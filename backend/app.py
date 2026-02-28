@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -645,17 +646,19 @@ def flora_recommendations_for_zip(
     ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
         species_entries, normalized_plant_type
     )
+    shuffled_species = list(ranked_species)
+    random.shuffle(shuffled_species)
 
     flora_plants: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for position, species in enumerate(ranked_species):
+    for position, species in enumerate(shuffled_species):
         mapped_plant = flora_species_to_plant(species, state_code=state_code, zone_hint=zone_hint, position=position)
         plant_id = mapped_plant["id"]
         if plant_id in seen_ids:
             continue
         seen_ids.add(plant_id)
         flora_plants.append(mapped_plant)
-        if len(flora_plants) >= 12:
+        if len(flora_plants) >= 10:
             break
 
     climate_profile = {
