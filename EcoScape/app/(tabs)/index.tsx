@@ -880,8 +880,8 @@ export default function HomeScreen() {
   return (
     <ScrollView style={styles.page} contentContainerStyle={styles.pageContent}>
       <View style={styles.heroCard}>
-        <Text style={styles.heroKicker}>Sustainable Garden Designer</Text>
-        <Text style={styles.heroTitle}>Design your layout, then optimize its eco impact.</Text>
+        <Text style={styles.heroKicker}>Ecoscape</Text>
+        <Text style={styles.heroTitle}>Design your garden and optimize its eco impact!</Text>
         <Text style={styles.heroSubtitle}>
           Enter your ZIP code, drag plants onto the grid, resize coverage, and watch live scores update.
         </Text>
