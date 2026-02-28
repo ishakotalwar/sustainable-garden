@@ -11,6 +11,7 @@ cd /Users/24ishak/Desktop/sustainable-garden
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+# set your Flora API key in /Users/24ishak/Desktop/sustainable-garden/.env
 python backend/app.py
 ```
 
@@ -35,4 +36,5 @@ EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:5001 npm run web
 - `GET /api/health`
 - `GET /api/config`
 - `GET /api/recommendations?climateId=irvine`
+- `GET /api/recommendations/zipcode?zipCode=94102`
 - `POST /api/score`

@@ -60,11 +60,23 @@ type ApiConfigResponse = {
     minGardenDimension?: number;
     maxGardenDimension?: number;
   };
+  integrations?: {
+    flora?: {
+      enabled?: boolean;
+      baseUrl?: string;
+    };
+  };
 };
 
 type ApiRecommendationsResponse = {
   climate: ClimateProfile;
   plants: Plant[];
+  zipCode?: string;
+  state?: string;
+  source?: 'flora' | 'local';
+  floraEnabled?: boolean;
+  error?: string;
+  detail?: string;
 };
 
 type ApiScoreResponse = {
@@ -233,6 +245,25 @@ function parseGardenDimension(rawValue: string): number {
   return Math.max(parsed, 1);
 }
 
+function normalizeZipCode(rawValue: string): string | null {
+  const digitsOnly = rawValue.replace(/\D/g, '');
+  if (digitsOnly.length < 5) {
+    return null;
+  }
+  return digitsOnly.slice(0, 5);
+}
+
+function mergePlantLists(currentPlants: Plant[], incomingPlants: Plant[]): Plant[] {
+  const merged = new Map<string, Plant>();
+  for (const plant of currentPlants) {
+    merged.set(plant.id, plant);
+  }
+  for (const plant of incomingPlants) {
+    merged.set(plant.id, plant);
+  }
+  return Array.from(merged.values());
+}
+
 function describeScore(score: number): string {
   if (score >= 85) {
     return 'Excellent';
@@ -268,22 +299,6 @@ function weightedAverage(values: number[], weights: number[]): number {
     return 0;
   }
   return values.reduce((sum, value, index) => sum + value * (weights[index] ?? 0), 0) / weightTotal;
-}
-
-function recommendPlants(climate: ClimateProfile, plantLibrary: Plant[]): Plant[] {
-  const nativeByZone = plantLibrary.filter(
-    (plant) => plant.nativeRegions.includes(climate.region) && plant.zones.includes(climate.zone)
-  );
-  const adaptiveByZone = plantLibrary.filter(
-    (plant) => !plant.nativeRegions.includes(climate.region) && plant.zones.includes(climate.zone)
-  );
-  const nativeFallback = plantLibrary.filter(
-    (plant) => plant.nativeRegions.includes(climate.region) && !plant.zones.includes(climate.zone)
-  );
-
-  const ordered = [...nativeByZone, ...adaptiveByZone, ...nativeFallback];
-  const deduped = ordered.filter((plant, index) => ordered.findIndex((item) => item.id === plant.id) === index);
-  return deduped.slice(0, 8);
 }
 
 function computeMetrics(
@@ -426,6 +441,11 @@ export default function HomeScreen() {
   const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
   const [placedPlants, setPlacedPlants] = useState<PlacedPlant[]>([]);
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
+  const [zipCodeInput, setZipCodeInput] = useState('');
+  const [activeZipCode, setActiveZipCode] = useState<string | null>(null);
+  const [zipLookupLoading, setZipLookupLoading] = useState(false);
+  const [zipLookupMessage, setZipLookupMessage] = useState<string | null>(null);
+  const [zipLookupError, setZipLookupError] = useState(false);
   const [canvasImageInput, setCanvasImageInput] = useState('');
   const [canvasImageUri, setCanvasImageUri] = useState<string | null>(null);
   const [canvasImageMessage, setCanvasImageMessage] = useState<string | null>(null);
@@ -433,9 +453,7 @@ export default function HomeScreen() {
   const uploadedObjectUrlRef = useRef<string | null>(null);
   const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
   const [plantLibrary, setPlantLibrary] = useState<Plant[]>(DEFAULT_PLANT_LIBRARY);
-  const [recommendations, setRecommendations] = useState<Plant[]>(
-    recommendPlants(defaultClimate(DEFAULT_CLIMATE_OPTIONS), DEFAULT_PLANT_LIBRARY)
-  );
+  const [recommendations, setRecommendations] = useState<Plant[]>([]);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
   const [backendMessage, setBackendMessage] = useState('Connecting to Flask API...');
   const [apiMetrics, setApiMetrics] = useState<SustainabilityMetrics | null>(null);
@@ -519,45 +537,6 @@ export default function HomeScreen() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadRecommendations() {
-      if (backendStatus !== 'connected') {
-        setRecommendations(recommendPlants(selectedClimate, plantLibrary));
-        return;
-      }
-
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/recommendations?climateId=${encodeURIComponent(selectedClimate.id)}`
-        );
-        if (!response.ok) {
-          throw new Error(`Recommendation request failed: ${response.status}`);
-        }
-        const payload = (await response.json()) as ApiRecommendationsResponse;
-        if (cancelled) {
-          return;
-        }
-        setRecommendations(
-          payload.plants?.length ? payload.plants : recommendPlants(selectedClimate, plantLibrary)
-        );
-      } catch {
-        if (cancelled) {
-          return;
-        }
-        setRecommendations(recommendPlants(selectedClimate, plantLibrary));
-        setBackendStatus('offline');
-        setBackendMessage('Recommendation API offline. Using local recommendation engine.');
-      }
-    }
-
-    loadRecommendations();
-    return () => {
-      cancelled = true;
-    };
-  }, [backendStatus, plantLibrary, selectedClimate]);
 
   useEffect(() => {
     if (backendStatus !== 'connected') {
@@ -800,13 +779,64 @@ export default function HomeScreen() {
     setCanvasImageHasError(false);
   }
 
+  async function lookupZipRecommendations() {
+    const normalizedZipCode = normalizeZipCode(zipCodeInput);
+    if (!normalizedZipCode) {
+      setZipLookupMessage('Enter a valid 5-digit ZIP code.');
+      setZipLookupError(true);
+      return;
+    }
+
+    setZipLookupLoading(true);
+    setZipLookupError(false);
+    setZipLookupMessage('Looking up Flora recommendations by ZIP...');
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/recommendations/zipcode?zipCode=${encodeURIComponent(normalizedZipCode)}`
+      );
+      const payload = (await response.json()) as ApiRecommendationsResponse;
+      if (!response.ok || payload.error) {
+        throw new Error(payload.detail || payload.error || `ZIP lookup failed (${response.status}).`);
+      }
+      if (!payload.plants?.length) {
+        throw new Error('No Flora recommendations were returned for this ZIP code.');
+      }
+
+      setPlantLibrary((currentPlants) => mergePlantLists(currentPlants, payload.plants));
+      setClimateOptions((currentOptions) => {
+        const filtered = currentOptions.filter((profile) => profile.id !== payload.climate.id);
+        return [payload.climate, ...filtered];
+      });
+      setSelectedClimateId(payload.climate.id);
+      setRecommendations(payload.plants);
+      setActiveZipCode(normalizedZipCode);
+      setZipCodeInput(normalizedZipCode);
+      setZipLookupError(false);
+      setZipLookupMessage(
+        `Loaded ${payload.plants.length} Flora recommendations for ZIP ${normalizedZipCode}${
+          payload.state ? ` (${payload.state})` : ''
+        }.`
+      );
+      setBackendStatus('connected');
+      setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
+    } catch (error) {
+      setRecommendations([]);
+      setActiveZipCode(null);
+      setZipLookupError(true);
+      setZipLookupMessage(error instanceof Error ? error.message : 'ZIP lookup failed.');
+    } finally {
+      setZipLookupLoading(false);
+    }
+  }
+
   return (
     <ScrollView style={styles.page} contentContainerStyle={styles.pageContent}>
       <View style={styles.heroCard}>
         <Text style={styles.heroKicker}>Sustainable Garden Designer</Text>
         <Text style={styles.heroTitle}>Design your layout, then optimize its eco impact.</Text>
         <Text style={styles.heroSubtitle}>
-          Pick your location, drag plants onto the grid, resize coverage, and watch live scores update.
+          Enter your ZIP code, drag plants onto the grid, resize coverage, and watch live scores update.
         </Text>
         <View
           style={[
@@ -854,51 +884,72 @@ export default function HomeScreen() {
         </View>
         <Text style={styles.sectionHint}>Area is raw from your inputs. Canvas preview is capped at 24x24 ft.</Text>
 
-        <Text style={styles.sectionHint}>Climate Zone / Location</Text>
-        <View style={styles.climateGrid}>
-          {climateOptions.map((profile) => {
-            const isSelected = profile.id === selectedClimate.id;
-            return (
-              <Pressable
-                key={profile.id}
-                onPress={() => setSelectedClimateId(profile.id)}
-                style={[styles.climateChip, isSelected ? styles.climateChipSelected : undefined]}>
-                <Text style={[styles.climateChipTitle, isSelected ? styles.climateChipTitleSelected : undefined]}>
-                  {profile.label}
-                </Text>
-                <Text style={[styles.climateChipMeta, isSelected ? styles.climateChipMetaSelected : undefined]}>
-                  Zone {profile.zone}
-                </Text>
-              </Pressable>
-            );
-          })}
+        <View style={styles.zipLookupCard}>
+          <Text style={styles.dimensionLabel}>ZIP Code (Flora API)</Text>
+          <View style={styles.zipLookupRow}>
+            <TextInput
+              value={zipCodeInput}
+              onChangeText={setZipCodeInput}
+              keyboardType="number-pad"
+              maxLength={10}
+              style={styles.zipLookupInput}
+              placeholder="e.g. 94102"
+            />
+            <Pressable
+              onPress={lookupZipRecommendations}
+              style={[styles.zipLookupButton, zipLookupLoading ? styles.zipLookupButtonDisabled : undefined]}
+              disabled={zipLookupLoading}>
+              <Text style={styles.zipLookupButtonText}>{zipLookupLoading ? 'Looking...' : 'Use ZIP'}</Text>
+            </Pressable>
+          </View>
+          {zipLookupMessage ? (
+            <Text style={zipLookupError ? styles.zipLookupErrorText : styles.zipLookupInfoText}>
+              {zipLookupMessage}
+            </Text>
+          ) : (
+            <Text style={styles.sectionHint}>
+              Enter ZIP to pull climate-aware native plants from Flora API through your backend.
+            </Text>
+          )}
         </View>
       </View>
 
       <View style={styles.sectionCard}>
         <Text style={styles.sectionTitle}>2. Recommended Plants</Text>
-        <Text style={styles.sectionHint}>Native picks appear first for {selectedClimate.label}.</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.plantList}>
-          {recommendations.map((plant) => {
-            const isNative = plant.nativeRegions.includes(selectedClimate.region);
-            return (
-              <View key={plant.id} style={styles.plantCard}>
-                <Text style={styles.plantName}>
-                  {plant.emoji} {plant.name}
-                </Text>
-                <Text style={styles.plantMeta}>
-                  {isNative ? 'Native match' : 'Adaptive pick'} • Water {plant.waterUsage}
-                </Text>
-                <Text style={styles.plantMeta}>
-                  Pollinators {plant.pollinatorValue} • Drought {plant.droughtResistance}
-                </Text>
-                <Pressable style={styles.addButton} onPress={() => addPlantToCanvas(plant)}>
-                  <Text style={styles.addButtonText}>Add to Canvas</Text>
-                </Pressable>
-              </View>
-            );
-          })}
-        </ScrollView>
+        <Text style={styles.sectionHint}>
+          {activeZipCode
+            ? `ZIP-based Flora recommendations for ${selectedClimate.label}.`
+            : 'Enter a ZIP code above to load Flora recommendations.'}
+        </Text>
+        {recommendations.length === 0 ? (
+          <View style={styles.emptyRecommendationsCard}>
+            <Text style={styles.emptyRecommendationsText}>
+              No recommendations loaded yet. Enter a ZIP code and click `Use ZIP`.
+            </Text>
+          </View>
+        ) : (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.plantList}>
+            {recommendations.map((plant) => {
+              const isNative = plant.nativeRegions.includes(selectedClimate.region);
+              return (
+                <View key={plant.id} style={styles.plantCard}>
+                  <Text style={styles.plantName}>
+                    {plant.emoji} {plant.name}
+                  </Text>
+                  <Text style={styles.plantMeta}>
+                    {isNative ? 'Native match' : 'Adaptive pick'} • Water {plant.waterUsage}
+                  </Text>
+                  <Text style={styles.plantMeta}>
+                    Pollinators {plant.pollinatorValue} • Drought {plant.droughtResistance}
+                  </Text>
+                  <Pressable style={styles.addButton} onPress={() => addPlantToCanvas(plant)}>
+                    <Text style={styles.addButtonText}>Add to Canvas</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </ScrollView>
+        )}
       </View>
 
       <View style={styles.sectionCard}>
@@ -1227,40 +1278,73 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginTop: 2,
   },
-  climateGrid: {
+  zipLookupCard: {
+    borderWidth: 1,
+    borderColor: '#cde2d4',
+    borderRadius: 12,
+    backgroundColor: '#f6fcf7',
+    padding: 10,
     gap: 8,
   },
-  climateChip: {
+  zipLookupRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  zipLookupInput: {
+    flex: 1,
     borderWidth: 1,
-    borderColor: '#cde3d3',
-    backgroundColor: '#f6fcf7',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  climateChipSelected: {
-    borderColor: '#0f8a5b',
-    backgroundColor: '#e6f9ee',
-  },
-  climateChipTitle: {
+    borderColor: '#b8d5c1',
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    color: '#173a2b',
     fontSize: 14,
-    color: '#2f5040',
+    fontWeight: '600',
+  },
+  zipLookupButton: {
+    minWidth: 98,
+    borderRadius: 10,
+    backgroundColor: '#145b7b',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  zipLookupButtonDisabled: {
+    backgroundColor: '#6d8a98',
+  },
+  zipLookupButtonText: {
+    color: '#ecf8ff',
     fontWeight: '700',
-  },
-  climateChipTitleSelected: {
-    color: '#0f6845',
-  },
-  climateChipMeta: {
-    marginTop: 2,
     fontSize: 12,
-    color: '#567b66',
   },
-  climateChipMetaSelected: {
-    color: '#228657',
+  zipLookupInfoText: {
+    color: '#2f5e47',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  zipLookupErrorText: {
+    color: '#a53a1a',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
   },
   plantList: {
     gap: 10,
     paddingRight: 8,
+  },
+  emptyRecommendationsCard: {
+    borderWidth: 1,
+    borderColor: '#d2e4d7',
+    borderRadius: 12,
+    backgroundColor: '#f7fcf8',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  emptyRecommendationsText: {
+    color: '#3d5f4c',
+    fontSize: 13,
+    lineHeight: 19,
   },
   plantCard: {
     width: 230,
