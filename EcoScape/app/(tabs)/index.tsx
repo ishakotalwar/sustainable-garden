@@ -58,7 +58,6 @@ type ApiConfigResponse = {
   climateOptions: ClimateProfile[];
   plantLibrary: Plant[];
   plantTypeOptions?: { id: string; label: string }[];
-  constraints?: { minGardenDimension?: number; maxGardenDimension?: number };
   integrations?: { flora?: { enabled?: boolean; baseUrl?: string } };
 };
 
@@ -83,6 +82,9 @@ type ApiScoreResponse = {
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:5001';
 const SCREEN_HEIGHT = Dimensions.get('window').height;
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const MIN_CANVAS_SIZE = 220;
+const DEFAULT_CANVAS_SIZE = Math.max(MIN_CANVAS_SIZE, Math.min(420, SCREEN_WIDTH - 28));
 
 const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
   { id: 'irvine', label: 'Irvine, CA', zone: '10a', region: 'CA' },
@@ -126,11 +128,6 @@ const EMPTY_METRICS: SustainabilityMetrics = {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
-}
-
-function parseGardenDimension(rawValue: string): number {
-  const parsed = Number.parseInt(rawValue, 10);
-  return Number.isNaN(parsed) ? 10 : Math.max(parsed, 1);
 }
 
 function normalizeZipCode(rawValue: string): string | null {
@@ -229,8 +226,6 @@ function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMo
 }
 
 export default function HomeScreen() {
-  const [widthInput, setWidthInput] = useState('10');
-  const [heightInput, setHeightInput] = useState('10');
   const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
   const [placedPlants, setPlacedPlants] = useState<PlacedPlant[]>([]);
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
@@ -245,6 +240,7 @@ export default function HomeScreen() {
   const [canvasImageUri, setCanvasImageUri] = useState<string | null>(null);
   const [canvasImageMessage, setCanvasImageMessage] = useState<string | null>(null);
   const [canvasImageHasError, setCanvasImageHasError] = useState(false);
+  const [canvasDimensions, setCanvasDimensions] = useState({ width: DEFAULT_CANVAS_SIZE, height: DEFAULT_CANVAS_SIZE });
   const uploadedObjectUrlRef = useRef<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
@@ -262,14 +258,29 @@ export default function HomeScreen() {
     () => plantTypeOptions.find(o => o.id === selectedPlantType)?.label ?? 'Any',
     [plantTypeOptions, selectedPlantType]
   );
-  const gardenWidthFeet = parseGardenDimension(widthInput);
-  const gardenHeightFeet = parseGardenDimension(heightInput);
-  const gardenAreaSqFt = gardenWidthFeet * gardenHeightFeet;
-  const canvasWidthFeet = clamp(gardenWidthFeet, 6, 24);
-  const canvasHeightFeet = clamp(gardenHeightFeet, 6, 24);
-  const gridUnit = Math.max(12, Math.min(40, Math.floor(360 / Math.max(canvasWidthFeet, canvasHeightFeet))));
-  const canvasWidth = canvasWidthFeet * gridUnit;
-  const canvasHeight = canvasHeightFeet * gridUnit;
+  const canvasWidth = canvasDimensions.width;
+  const canvasHeight = canvasDimensions.height;
+  const gridUnit = Math.max(20, Math.round(Math.min(canvasWidth, canvasHeight) / 12));
+  const verticalGridLines = useMemo(() => {
+    const lines: number[] = [];
+    for (let position = 0; position <= canvasWidth; position += gridUnit) {
+      lines.push(position);
+    }
+    if (lines[lines.length - 1] !== canvasWidth) {
+      lines.push(canvasWidth);
+    }
+    return lines;
+  }, [canvasWidth, gridUnit]);
+  const horizontalGridLines = useMemo(() => {
+    const lines: number[] = [];
+    for (let position = 0; position <= canvasHeight; position += gridUnit) {
+      lines.push(position);
+    }
+    if (lines[lines.length - 1] !== canvasHeight) {
+      lines.push(canvasHeight);
+    }
+    return lines;
+  }, [canvasHeight, gridUnit]);
   const plantsById = useMemo(() =>
     plantLibrary.reduce<Record<string, Plant>>((acc, p) => { acc[p.id] = p; return acc; }, {}), [plantLibrary]);
   const fallbackMetrics = useMemo(() =>
@@ -397,13 +408,83 @@ export default function HomeScreen() {
     uploadedObjectUrlRef.current = null;
   }
 
+  function fitCanvasToImage(sourceWidth: number, sourceHeight: number) {
+    if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
+      return;
+    }
+    const maxCanvasWidth = Math.max(MIN_CANVAS_SIZE, Math.min(900, SCREEN_WIDTH - 32));
+    const maxCanvasHeight = Math.max(MIN_CANVAS_SIZE, Math.min(640, SCREEN_HEIGHT * 0.62));
+    const downscale = Math.min(maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
+
+    let width = Math.round(sourceWidth * downscale);
+    let height = Math.round(sourceHeight * downscale);
+
+    if (width < MIN_CANVAS_SIZE || height < MIN_CANVAS_SIZE) {
+      const minScale = Math.max(MIN_CANVAS_SIZE / sourceWidth, MIN_CANVAS_SIZE / sourceHeight);
+      const boundedScale = Math.min(minScale, maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
+      width = Math.round(sourceWidth * boundedScale);
+      height = Math.round(sourceHeight * boundedScale);
+    }
+
+    setCanvasDimensions({
+      width: Math.max(1, width),
+      height: Math.max(1, height),
+    });
+  }
+
+  async function probeImageDimensions(uri: string): Promise<{ width: number; height: number } | null> {
+    if (!uri) {
+      return null;
+    }
+
+    if (Platform.OS === 'web') {
+      const browserImageCtor = (globalThis as { Image?: new () => any }).Image;
+      if (!browserImageCtor) {
+        return null;
+      }
+      return new Promise(resolve => {
+        const browserImage = new browserImageCtor();
+        browserImage.onload = () => {
+          const width = Number(browserImage.naturalWidth || browserImage.width);
+          const height = Number(browserImage.naturalHeight || browserImage.height);
+          if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+            resolve({ width, height });
+            return;
+          }
+          resolve(null);
+        };
+        browserImage.onerror = () => resolve(null);
+        browserImage.src = uri;
+      });
+    }
+
+    return new Promise(resolve => {
+      Image.getSize(
+        uri,
+        (width, height) => resolve({ width, height }),
+        () => resolve(null)
+      );
+    });
+  }
+
+  async function syncCanvasToImage(uri: string) {
+    const dimensions = await probeImageDimensions(uri);
+    if (!dimensions) {
+      return;
+    }
+    fitCanvasToImage(dimensions.width, dimensions.height);
+  }
+
   function applyCanvasImage() {
     const nextUri = canvasImageInput.trim();
     if (!nextUri) { setCanvasImageMessage('Enter an image URL first.'); setCanvasImageHasError(true); return; }
     const valid = nextUri.startsWith('https://') || nextUri.startsWith('http://') || nextUri.startsWith('data:image/') || nextUri.startsWith('file://');
     if (!valid) { setCanvasImageMessage('Use a valid URL (https://...) or data:image/... value.'); setCanvasImageHasError(true); return; }
     clearUploadedObjectUrl();
-    setCanvasImageUri(nextUri); setCanvasImageMessage('Loading backyard image...'); setCanvasImageHasError(false);
+    setCanvasImageUri(nextUri);
+    setCanvasImageMessage('Loading backyard image...');
+    setCanvasImageHasError(false);
+    void syncCanvasToImage(nextUri);
   }
 
   function uploadCanvasImageFromDevice() {
@@ -420,12 +501,18 @@ export default function HomeScreen() {
       clearUploadedObjectUrl(); uploadedObjectUrlRef.current = url;
       setCanvasImageInput(f.name ?? 'local-image'); setCanvasImageUri(url);
       setCanvasImageMessage(`Loaded: ${f.name ?? 'image'}`); setCanvasImageHasError(false);
+      void syncCanvasToImage(url);
     };
     fi.click();
   }
 
   function removeCanvasImage() {
-    clearUploadedObjectUrl(); setCanvasImageUri(null); setCanvasImageInput(''); setCanvasImageMessage(null); setCanvasImageHasError(false);
+    clearUploadedObjectUrl();
+    setCanvasImageUri(null);
+    setCanvasImageInput('');
+    setCanvasImageMessage(null);
+    setCanvasImageHasError(false);
+    setCanvasDimensions({ width: DEFAULT_CANVAS_SIZE, height: DEFAULT_CANVAS_SIZE });
   }
 
   async function lookupZipRecommendations() {
@@ -476,27 +563,6 @@ export default function HomeScreen() {
             Build a sustainable garden and see your eco impact!
           </Text>
         </View>
-        {/* <View style={styles.heroBar}>
-          <View style={styles.heroBarItem}>
-            <Text style={styles.heroBarNum}>{placedPlants.length}</Text>
-            <Text style={styles.heroBarLabel}>Plants placed</Text>
-          </View>
-          <View style={styles.heroBarDivider} />
-          <View style={styles.heroBarItem}>
-            <Text style={styles.heroBarNum}>{gardenAreaSqFt} ft²</Text>
-            <Text style={styles.heroBarLabel}>Garden area</Text>
-          </View>
-          <View style={styles.heroBarDivider} />
-          <View style={styles.heroBarItem}>
-            <Text style={[styles.heroBarNum, { color: scoreColor(metrics.sustainabilityScore) }]}>
-              {metrics.sustainabilityScore}/100
-            </Text>
-            <Text style={styles.heroBarLabel}>Eco score</Text>
-          </View>
-        </View> */}
-        {/* <View style={styles.heroScrollCue}>
-          <Text style={styles.heroScrollCueText}>scroll to start  ↓</Text>
-        </View> */}
         <Pressable style={styles.getStartedBtn} onPress={() => scrollRef.current?.scrollTo({ y: SCREEN_HEIGHT, animated: true })}>
           <Text style={styles.getStartedText}>Get Started ↓</Text>
         </Pressable>
@@ -508,22 +574,7 @@ export default function HomeScreen() {
           <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>1</Text></View>
           <Text style={styles.sectionTitle}>Garden Setup</Text>
         </View>
-        <Text style={styles.fieldLabel}>Garden Size</Text>
-        <View style={styles.dimensionRow}>
-          <View style={styles.dimensionField}>
-            <Text style={styles.dimensionLabel}>Width (ft)</Text>
-            <TextInput value={widthInput} onChangeText={setWidthInput} keyboardType="number-pad" style={styles.dimensionInput} placeholder="10" />
-          </View>
-          <View style={styles.dimensionField}>
-            <Text style={styles.dimensionLabel}>Height (ft)</Text>
-            <TextInput value={heightInput} onChangeText={setHeightInput} keyboardType="number-pad" style={styles.dimensionInput} placeholder="10" />
-          </View>
-          <View style={styles.dimensionSummary}>
-            <Text style={styles.dimensionSummaryLabel}>Area</Text>
-            <Text style={styles.dimensionSummaryValue}>{gardenAreaSqFt} sq ft</Text>
-          </View>
-        </View>
-        <Text style={styles.hint}>Canvas preview is capped at 24×24 ft.</Text>
+        <Text style={styles.hint}>Grid automatically fits the current canvas/image size.</Text>
         <Text style={styles.fieldLabel}>Plant Type</Text>
         <View style={styles.chipRow}>
           {plantTypeOptions.map(opt => {
@@ -620,16 +671,25 @@ export default function HomeScreen() {
             {canvasImageUri ? (
               <>
                 <Image source={{ uri: canvasImageUri }} style={StyleSheet.absoluteFillObject} resizeMode="cover"
-                  onLoad={() => { setCanvasImageMessage('Image loaded.'); setCanvasImageHasError(false); }}
+                  onLoad={(event) => {
+                    const source = event.nativeEvent?.source;
+                    const sourceWidth = Number(source?.width);
+                    const sourceHeight = Number(source?.height);
+                    if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
+                      fitCanvasToImage(sourceWidth, sourceHeight);
+                    }
+                    setCanvasImageMessage('Image loaded.');
+                    setCanvasImageHasError(false);
+                  }}
                   onError={() => { setCanvasImageMessage('Could not load image. Check the URL.'); setCanvasImageHasError(true); }} />
                 <View pointerEvents="none" style={styles.canvasOverlay} />
               </>
             ) : null}
-            {Array.from({ length: canvasWidthFeet + 1 }, (_, i) => (
-              <View key={`v${i}`} style={[styles.gridV, { left: i * gridUnit }]} />
+            {verticalGridLines.map((position, index) => (
+              <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
             ))}
-            {Array.from({ length: canvasHeightFeet + 1 }, (_, i) => (
-              <View key={`h${i}`} style={[styles.gridH, { top: i * gridUnit }]} />
+            {horizontalGridLines.map((position, index) => (
+              <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
             ))}
             {placedPlants.map(item => {
               const plant = plantsById[item.plantId];
@@ -741,13 +801,6 @@ const styles = StyleSheet.create({
   heroEyebrow: { color: '#b8dfa0', fontSize: 14, fontWeight: '700', letterSpacing: 1.4, textTransform: 'uppercase', marginBottom: 16 },
   heroTitle: { color: '#f5ede0', fontSize: 80, fontWeight: '900', lineHeight: 75, textAlign: 'center', letterSpacing: -1, marginBottom: 18, fontFamily: 'Georgia'},
   heroSub: { color: '#c8dfc0', fontSize: 16, lineHeight: 24, textAlign: 'center', fontWeight: '400' },
-  heroBar: { flexDirection: 'row', margin: 16, backgroundColor: 'rgba(10, 20, 8, 0.55)', borderRadius: 20, paddingVertical: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
-  heroBarItem: { flex: 1, alignItems: 'center' },
-  heroBarNum: { color: '#f5ede0', fontSize: 20, fontWeight: '900' },
-  heroBarLabel: { color: '#9ab88a', fontSize: 11, fontWeight: '600', marginTop: 3 },
-  heroBarDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.15)' },
-  // heroScrollCue: { alignItems: 'center', paddingBottom: 16 },
-  // heroScrollCueText: { color: 'rgba(200,220,190,0.7)', fontSize: 12, letterSpacing: 0.5 },
  getStartedBtn: {
   marginBottom: 100,
   backgroundColor: 'rgba(255,255,255,0.15)',
@@ -771,14 +824,6 @@ getStartedText: {
   hint: { fontSize: 12, color: '#9c8b72', lineHeight: 17 },
   msgInfo: { fontSize: 12, color: '#3a6040', lineHeight: 17 },
   msgError: { fontSize: 12, color: '#9f3412', lineHeight: 17, fontWeight: '600' },
-
-  dimensionRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-end' },
-  dimensionField: { flex: 1, gap: 5 },
-  dimensionLabel: { fontSize: 11, color: MID_BROWN, fontWeight: '600' },
-  dimensionInput: { borderWidth: 1.5, borderColor: SOFT, borderRadius: 12, backgroundColor: '#fdfaf4', paddingHorizontal: 12, paddingVertical: 11, fontSize: 17, color: BROWN, fontWeight: '800' },
-  dimensionSummary: { minWidth: 90, backgroundColor: '#f0ebe0', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 11, alignItems: 'center', borderWidth: 1.5, borderColor: SOFT },
-  dimensionSummaryLabel: { fontSize: 10, color: MID_BROWN, fontWeight: '700', textTransform: 'uppercase' },
-  dimensionSummaryValue: { fontSize: 15, color: BROWN, fontWeight: '900', marginTop: 2 },
 
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },

@@ -789,7 +789,6 @@ def config() -> Any:
         {
             "climateOptions": CLIMATE_OPTIONS,
             "plantLibrary": PLANT_LIBRARY,
-            "constraints": {"minGardenDimension": 6, "maxGardenDimension": 24},
             "plantTypeOptions": plant_type_options,
             "integrations": {
                 "flora": {
