@@ -42,137 +42,16 @@ load_env_file(PROJECT_ROOT / ".env")
 FLORA_API_BASE_URL = os.getenv("FLORA_API_BASE_URL", "https://api.floraapi.com").rstrip("/")
 FLORA_API_KEY = os.getenv("FLORA_API_KEY", "").strip()
 
-STATE_TO_REGION: dict[str, str] = {
-    "CA": "CA",
-    "AZ": "Southwest",
-    "NM": "Southwest",
-    "NV": "Southwest",
-    "UT": "Southwest",
-    "CO": "Southwest",
-    "WA": "PacificNW",
-    "OR": "PacificNW",
-    "ID": "PacificNW",
-    "AK": "PacificNW",
-    "HI": "PacificNW",
+DEFAULT_CLIMATE_PROFILE: dict[str, str] = {
+    "id": "local",
+    "label": "Local",
+    "zone": "unknown",
+    "region": "generic",
 }
 
-CLIMATE_OPTIONS: list[dict[str, str]] = [
-    {"id": "irvine", "label": "Irvine, CA", "zone": "10a", "region": "CA"},
-    {"id": "santa-barbara", "label": "Santa Barbara, CA", "zone": "9b", "region": "CA"},
-    {"id": "phoenix", "label": "Phoenix, AZ", "zone": "10b", "region": "Southwest"},
-    {"id": "seattle", "label": "Seattle, WA", "zone": "8b", "region": "PacificNW"},
-]
+CLIMATE_OPTIONS: list[dict[str, str]] = []
 
-PLANT_LIBRARY: list[dict[str, Any]] = [
-    {
-        "id": "ceanothus",
-        "name": "California Lilac",
-        "emoji": "🪻",
-        "zones": ["8b", "9b", "10a"],
-        "nativeRegions": ["CA"],
-        "waterUsage": "Low",
-        "pollinatorValue": "High",
-        "carbonSequestration": "Medium",
-        "shadeCoverage": "Medium",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "toyon",
-        "name": "Toyon",
-        "emoji": "🌿",
-        "zones": ["8b", "9b", "10a"],
-        "nativeRegions": ["CA"],
-        "waterUsage": "Low",
-        "pollinatorValue": "High",
-        "carbonSequestration": "High",
-        "shadeCoverage": "Medium",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "manzanita",
-        "name": "Manzanita",
-        "emoji": "🪴",
-        "zones": ["8b", "9b", "10a"],
-        "nativeRegions": ["CA"],
-        "waterUsage": "Low",
-        "pollinatorValue": "Medium",
-        "carbonSequestration": "Medium",
-        "shadeCoverage": "Low",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "yarrow",
-        "name": "Yarrow",
-        "emoji": "🌼",
-        "zones": ["8b", "9b", "10a", "10b"],
-        "nativeRegions": ["CA", "PacificNW"],
-        "waterUsage": "Low",
-        "pollinatorValue": "High",
-        "carbonSequestration": "Low",
-        "shadeCoverage": "Low",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "milkweed",
-        "name": "Narrowleaf Milkweed",
-        "emoji": "🐝",
-        "zones": ["9b", "10a", "10b"],
-        "nativeRegions": ["CA", "Southwest"],
-        "waterUsage": "Medium",
-        "pollinatorValue": "High",
-        "carbonSequestration": "Medium",
-        "shadeCoverage": "Low",
-        "droughtResistance": "Medium",
-    },
-    {
-        "id": "lavender",
-        "name": "Lavender",
-        "emoji": "💜",
-        "zones": ["8b", "9b", "10a", "10b"],
-        "nativeRegions": ["CA", "Southwest"],
-        "waterUsage": "Low",
-        "pollinatorValue": "High",
-        "carbonSequestration": "Medium",
-        "shadeCoverage": "Low",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "sage",
-        "name": "White Sage",
-        "emoji": "🌱",
-        "zones": ["8b", "9b", "10a", "10b"],
-        "nativeRegions": ["CA", "Southwest"],
-        "waterUsage": "Low",
-        "pollinatorValue": "High",
-        "carbonSequestration": "Low",
-        "shadeCoverage": "Low",
-        "droughtResistance": "High",
-    },
-    {
-        "id": "oregon-grape",
-        "name": "Oregon Grape",
-        "emoji": "🍃",
-        "zones": ["8b", "9b"],
-        "nativeRegions": ["PacificNW"],
-        "waterUsage": "Medium",
-        "pollinatorValue": "Medium",
-        "carbonSequestration": "Medium",
-        "shadeCoverage": "Medium",
-        "droughtResistance": "Medium",
-    },
-    {
-        "id": "dwarf-citrus",
-        "name": "Dwarf Citrus",
-        "emoji": "🍋",
-        "zones": ["9b", "10a", "10b"],
-        "nativeRegions": ["Southeast"],
-        "waterUsage": "High",
-        "pollinatorValue": "Medium",
-        "carbonSequestration": "High",
-        "shadeCoverage": "Medium",
-        "droughtResistance": "Low",
-    },
-]
+PLANT_LIBRARY: list[dict[str, Any]] = []
 
 PLANTS_BY_ID: dict[str, dict[str, Any]] = {plant["id"]: plant for plant in PLANT_LIBRARY}
 DYNAMIC_CLIMATE_PROFILES: dict[str, dict[str, str]] = {}
@@ -295,6 +174,156 @@ def normalize_plant_type(raw_plant_type: str | None) -> str | None:
     return aliases.get(normalized)
 
 
+def normalize_plant_query(raw_plant_query: str | None) -> str | None:
+    if not raw_plant_query:
+        return None
+    normalized = " ".join(raw_plant_query.strip().split())
+    if not normalized:
+        return None
+    return normalized[:80]
+
+
+def fetch_species_entries_from_candidates(
+    candidates: list[tuple[str, dict[str, Any]]], strategy: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    attempted: list[dict[str, Any]] = []
+    successful_calls = 0
+    last_error: Exception | None = None
+
+    for path, params in candidates:
+        try:
+            payload = flora_get(path, params=params)
+            species_entries = extract_species_list(payload)
+            successful_calls += 1
+            attempted.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "resultCount": len(species_entries),
+                }
+            )
+            for species in species_entries:
+                signature = str(
+                    species.get("id")
+                    or species.get("species_id")
+                    or species.get("identifier")
+                    or species.get("usda_symbol")
+                    or species.get("scientific_name")
+                    or species.get("common_name")
+                    or ""
+                ).strip()
+                if not signature:
+                    continue
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                collected.append(species)
+                if len(collected) >= 150:
+                    break
+        except requests.RequestException as exc:
+            last_error = exc
+            attempted.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+    if not collected and last_error is not None and successful_calls == 0:
+        raise last_error
+
+    metadata = {
+        "strategy": strategy,
+        "attemptedQueries": attempted,
+        "successfulCalls": successful_calls,
+        "combinedSpeciesCount": len(collected),
+    }
+    return collected, metadata
+
+
+def flora_type_search_candidates(state_code: str, plant_type: str | None) -> list[tuple[str, dict[str, Any]]]:
+    base_params = {"state": state_code, "native_only": True, "limit": 80}
+    if not plant_type:
+        return [("/v1/search", base_params)]
+
+    if plant_type == "fruit":
+        return [
+            ("/v1/search/edible", {**base_params, "edible_part": "fruit"}),
+            ("/v1/search", {**base_params, "q": "fruit"}),
+            ("/v1/search", {**base_params, "q": "berry"}),
+            ("/v1/search", {**base_params, "q": "orchard"}),
+        ]
+
+    type_terms = {
+        "flower": ("forb", "flower"),
+        "bush": ("shrub", "bush"),
+        "tree": ("tree", "tree"),
+        "vine": ("vine", "vine"),
+        "grass": ("grass", "grass"),
+        "succulent": ("succulent", "succulent"),
+    }
+    habit_value, query_term = type_terms.get(plant_type, (plant_type, plant_type))
+    return [
+        ("/v1/search", {**base_params, "plant_habit": habit_value}),
+        ("/v1/search", {**base_params, "habit": habit_value}),
+        ("/v1/search", {**base_params, "q": query_term}),
+    ]
+
+
+def fetch_species_entries_for_type(
+    state_code: str, plant_type: str | None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    candidates = flora_type_search_candidates(state_code, plant_type)
+    strategy = "typed" if plant_type else "default"
+    return fetch_species_entries_from_candidates(candidates, strategy)
+
+
+def flora_query_search_candidates(
+    state_code: str, plant_query: str, plant_type: str | None
+) -> list[tuple[str, dict[str, Any]]]:
+    base = {"q": plant_query, "limit": 80}
+    option = PLANT_TYPE_OPTIONS.get(plant_type) if plant_type else None
+    flora_habit = option.get("flora_habit") if option else None
+
+    staged_params: list[dict[str, Any]] = [
+        {**base, "state": state_code, "native_only": True},
+        {**base, "state": state_code},
+        {**base},
+    ]
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen_param_keys: set[tuple[tuple[str, str], ...]] = set()
+
+    for params in staged_params:
+        variants = [params]
+        if isinstance(flora_habit, str) and flora_habit:
+            variants = [
+                {**params, "plant_habit": flora_habit},
+                {**params, "habit": flora_habit},
+                params,
+            ]
+        for variant in variants:
+            dedupe_key = tuple(sorted((key, str(value)) for key, value in variant.items()))
+            if dedupe_key in seen_param_keys:
+                continue
+            seen_param_keys.add(dedupe_key)
+            candidates.append(("/v1/search", variant))
+    return candidates
+
+
+def fetch_species_entries_for_query(
+    state_code: str, plant_query: str, plant_type: str | None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    candidates = flora_query_search_candidates(state_code, plant_query, plant_type)
+    collected, metadata = fetch_species_entries_from_candidates(candidates, "query")
+    metadata["plantQuery"] = plant_query
+    return collected, metadata
+
+
 def species_text_blob(species: dict[str, Any]) -> str:
     fields: list[str] = []
     for key in (
@@ -315,6 +344,44 @@ def species_text_blob(species: dict[str, Any]) -> str:
     return " ".join(fields).lower()
 
 
+def species_habit_text(species: dict[str, Any]) -> str:
+    return str(
+        species.get("habit")
+        or species.get("plant_habit")
+        or species.get("growth_habit")
+        or species.get("growth_form")
+        or ""
+    ).lower()
+
+
+def species_strict_match(species: dict[str, Any], plant_type: str) -> bool:
+    option = PLANT_TYPE_OPTIONS.get(plant_type)
+    if not option:
+        return True
+
+    keywords: tuple[str, ...] = option.get("keywords", ())
+    flora_habit = option.get("flora_habit")
+    habit_text = species_habit_text(species)
+    text_blob = species_text_blob(species)
+
+    if plant_type == "fruit":
+        edible_parts = species.get("edible_parts")
+        if isinstance(edible_parts, list) and any(
+            any(token in str(part).lower() for token in ("fruit", "berry", "nut"))
+            for part in edible_parts
+        ):
+            return True
+        return any(keyword in text_blob for keyword in keywords)
+
+    if plant_type == "flower":
+        if species.get("flower_color") or species.get("flowerColor") or species.get("bloom_time"):
+            return True
+
+    if isinstance(flora_habit, str) and flora_habit and flora_habit in habit_text:
+        return True
+    return any(keyword in habit_text for keyword in keywords)
+
+
 def species_match_score(species: dict[str, Any], plant_type: str) -> int:
     option = PLANT_TYPE_OPTIONS.get(plant_type)
     if not option:
@@ -322,16 +389,12 @@ def species_match_score(species: dict[str, Any], plant_type: str) -> int:
 
     keywords: tuple[str, ...] = option.get("keywords", ())
     flora_habit = option.get("flora_habit")
-    habit_text = str(
-        species.get("habit")
-        or species.get("plant_habit")
-        or species.get("growth_habit")
-        or species.get("growth_form")
-        or ""
-    ).lower()
+    habit_text = species_habit_text(species)
     text_blob = species_text_blob(species)
 
     score = 0
+    if species_strict_match(species, plant_type):
+        score += 6
     if isinstance(flora_habit, str) and flora_habit and flora_habit in habit_text:
         score += 5
     if any(keyword in habit_text for keyword in keywords):
@@ -361,30 +424,19 @@ def prioritize_species_by_plant_type(
         (species, species_match_score(species, plant_type), index)
         for index, species in enumerate(species_entries)
     ]
-    strong_matches = [item for item in scored if item[1] > 0]
+    strong_matches = [item for item in scored if species_strict_match(item[0], plant_type)]
     if strong_matches:
         strong_matches.sort(key=lambda item: (-item[1], item[2]))
         return [item[0] for item in strong_matches], len(strong_matches), False
 
-    # Relax filter when no strong metadata matches are available.
-    scored.sort(key=lambda item: (-item[1], item[2]))
-    return [item[0] for item in scored], 0, True
+    weak_matches = [item for item in scored if item[1] > 0]
+    if weak_matches:
+        weak_matches.sort(key=lambda item: (-item[1], item[2]))
+        return [item[0] for item in weak_matches], 0, True
 
-
-def region_from_state(state_code: str | None) -> str:
-    if not state_code:
-        return "Southeast"
-    return STATE_TO_REGION.get(state_code.upper(), "Southeast")
-
-
-def fallback_zone_for_region(region: str) -> str:
-    if region == "CA":
-        return "10a"
-    if region == "PacificNW":
-        return "8b"
-    if region == "Southwest":
-        return "9b"
-    return "9a"
+    # If we cannot infer type at all from metadata/text, return no results instead of
+    # silently returning unrelated plants.
+    return [], 0, True
 
 
 def normalize_rating(value: Any, default: str = "Medium") -> str:
@@ -532,7 +584,6 @@ def flora_species_to_plant(
         or "native"
     ).lower()
     is_native = "introduced" not in nativity_text and "non-native" not in nativity_text
-    region = region_from_state(state_code)
 
     pollinator_source = (
         species.get("pollinator_value")
@@ -556,7 +607,7 @@ def flora_species_to_plant(
         "name": display_name,
         "emoji": flora_emoji_for_species(species),
         "zones": parse_zones(species, zone_hint),
-        "nativeRegions": [region] if is_native else [],
+        "nativeRegions": ["native"] if is_native else [],
         "waterUsage": normalize_rating(water_source, default="Medium"),
         "pollinatorValue": normalize_rating(pollinator_source, default="Medium"),
         "carbonSequestration": normalize_rating(carbon_source, default="Medium"),
@@ -576,22 +627,20 @@ def register_runtime_plants(plants: list[dict[str, Any]]) -> None:
 
 
 def flora_recommendations_for_zip(
-    zip_code: str, plant_type: str | None = None
-) -> tuple[dict[str, str], list[dict[str, Any]], str, dict[str, Any]]:
+    zip_code: str, plant_type: str | None = None, plant_query: str | None = None
+) -> tuple[dict[str, str], list[dict[str, Any]], dict[str, Any]]:
     climate_payload = flora_get(f"/v1/climate/zipcode/{zip_code}")
     state_code = extract_state_code(climate_payload) or "CA"
-    region = region_from_state(state_code)
-    zone_hint = extract_zone_hint(climate_payload) or fallback_zone_for_region(region)
+    zone_hint = extract_zone_hint(climate_payload) or "unknown"
     normalized_plant_type = normalize_plant_type(plant_type)
+    normalized_plant_query = normalize_plant_query(plant_query)
 
-    search_payload = flora_get(
-        "/v1/search",
-        params={"state": state_code, "native_only": True, "limit": 80},
-    )
-    species_entries = extract_species_list(search_payload)
-    if not species_entries:
-        region_payload = flora_get(f"/v1/regions/{state_code}/native", params={"limit": 24})
-        species_entries = extract_species_list(region_payload)
+    if normalized_plant_query:
+        species_entries, query_metadata = fetch_species_entries_for_query(
+            state_code, normalized_plant_query, normalized_plant_type
+        )
+    else:
+        species_entries, query_metadata = fetch_species_entries_for_type(state_code, normalized_plant_type)
 
     ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
         species_entries, normalized_plant_type
@@ -611,63 +660,42 @@ def flora_recommendations_for_zip(
 
     climate_profile = {
         "id": f"zip-{zip_code}",
-        "label": f"ZIP {zip_code} ({state_code})",
+        "label": f"ZIP {zip_code}",
         "zone": zone_hint,
-        "region": region,
+        "region": "generic",
     }
     filter_metadata = {
         "plantType": normalized_plant_type,
+        "plantQuery": normalized_plant_query,
         "strictMatchCount": strict_match_count,
         "filterRelaxed": filter_relaxed,
+        "queryMetadata": query_metadata,
     }
-    return climate_profile, flora_plants, state_code, filter_metadata
+    return climate_profile, flora_plants, filter_metadata
 
 
 def get_climate_profile(climate_id: str | None) -> dict[str, str]:
     if not climate_id:
-        return CLIMATE_OPTIONS[0]
+        return dict(DEFAULT_CLIMATE_PROFILE)
     if climate_id in DYNAMIC_CLIMATE_PROFILES:
         return DYNAMIC_CLIMATE_PROFILES[climate_id]
-    return next((item for item in CLIMATE_OPTIONS if item["id"] == climate_id), CLIMATE_OPTIONS[0])
+    return {
+        "id": climate_id,
+        "label": str(climate_id),
+        "zone": "unknown",
+        "region": "generic",
+    }
 
 
 def recommend_plants(climate_profile: dict[str, str]) -> list[dict[str, Any]]:
-    region = climate_profile["region"]
-    zone = climate_profile["zone"]
-
-    native_by_zone = [
-        plant
-        for plant in PLANT_LIBRARY
-        if region in plant["nativeRegions"] and zone in plant["zones"]
-    ]
-    adaptive_by_zone = [
-        plant
-        for plant in PLANT_LIBRARY
-        if region not in plant["nativeRegions"] and zone in plant["zones"]
-    ]
-    native_fallback = [
-        plant
-        for plant in PLANT_LIBRARY
-        if region in plant["nativeRegions"] and zone not in plant["zones"]
-    ]
-
-    ordered = native_by_zone + adaptive_by_zone + native_fallback
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for plant in ordered:
-        plant_id = plant["id"]
-        if plant_id in seen:
-            continue
-        seen.add(plant_id)
-        deduped.append(plant)
-
-    return deduped[:8]
+    _ = climate_profile
+    return []
 
 
 def compute_metrics(
     climate_profile: dict[str, str], placed_plants_payload: list[dict[str, Any]]
 ) -> dict[str, int]:
-    region = climate_profile["region"]
+    _ = climate_profile
     resolved_entries: list[tuple[dict[str, Any], float]] = []
 
     for payload in placed_plants_payload:
@@ -711,9 +739,7 @@ def compute_metrics(
         weighted_average([RATING_POINTS[plant["carbonSequestration"]] for plant in plants], weights)
     )
 
-    native_weight = sum(
-        weight for plant, weight in resolved_entries if region in plant["nativeRegions"]
-    )
+    native_weight = sum(weight for plant, weight in resolved_entries if plant.get("nativeRegions"))
     native_percent = round((native_weight / total_weight) * 100) if total_weight else 0
 
     unique_species = len({plant["id"] for plant in plants})
@@ -777,7 +803,9 @@ def recommendations() -> Any:
     climate_id = request.args.get("climateId") or request.args.get("climate_id")
     zip_code = normalize_zip_code(request.args.get("zipCode") or request.args.get("zip_code"))
     requested_plant_type = request.args.get("plantType") or request.args.get("plant_type")
+    requested_plant_query = request.args.get("plantQuery") or request.args.get("plant_query")
     normalized_plant_type = normalize_plant_type(requested_plant_type)
+    normalized_plant_query = normalize_plant_query(requested_plant_query)
     if requested_plant_type and not normalized_plant_type:
         return (
             jsonify(
@@ -801,8 +829,8 @@ def recommendations() -> Any:
                 503,
         )
         try:
-            climate_profile, flora_plants, state_code, filter_metadata = flora_recommendations_for_zip(
-                zip_code, plant_type=normalized_plant_type
+            climate_profile, flora_plants, filter_metadata = flora_recommendations_for_zip(
+                zip_code, plant_type=normalized_plant_type, plant_query=normalized_plant_query
             )
         except requests.RequestException as exc:
             return (
@@ -824,12 +852,13 @@ def recommendations() -> Any:
                 "climate": climate_profile,
                 "plants": flora_plants,
                 "zipCode": zip_code,
-                "state": state_code,
                 "floraEnabled": True,
                 "source": "flora",
                 "plantType": normalized_plant_type,
+                "plantQuery": normalized_plant_query,
                 "filterRelaxed": filter_metadata["filterRelaxed"],
                 "strictMatchCount": filter_metadata["strictMatchCount"],
+                "queryMetadata": filter_metadata.get("queryMetadata"),
             }
         )
 
@@ -840,6 +869,7 @@ def recommendations() -> Any:
             "plants": recommend_plants(climate_profile),
             "source": "local",
             "plantType": normalized_plant_type,
+            "plantQuery": normalized_plant_query,
         }
     )
 
@@ -848,7 +878,9 @@ def recommendations() -> Any:
 def recommendations_by_zip_code() -> Any:
     zip_code = normalize_zip_code(request.args.get("zipCode") or request.args.get("zip_code"))
     requested_plant_type = request.args.get("plantType") or request.args.get("plant_type")
+    requested_plant_query = request.args.get("plantQuery") or request.args.get("plant_query")
     normalized_plant_type = normalize_plant_type(requested_plant_type)
+    normalized_plant_query = normalize_plant_query(requested_plant_query)
     if not zip_code:
         return jsonify({"error": "A valid 5-digit zipCode is required."}), 400
     if requested_plant_type and not normalized_plant_type:
@@ -875,8 +907,8 @@ def recommendations_by_zip_code() -> Any:
         )
 
     try:
-        climate_profile, flora_plants, state_code, filter_metadata = flora_recommendations_for_zip(
-            zip_code, plant_type=normalized_plant_type
+        climate_profile, flora_plants, filter_metadata = flora_recommendations_for_zip(
+            zip_code, plant_type=normalized_plant_type, plant_query=normalized_plant_query
         )
     except requests.RequestException as exc:
         return (
@@ -898,12 +930,13 @@ def recommendations_by_zip_code() -> Any:
             "climate": climate_profile,
             "plants": flora_plants,
             "zipCode": zip_code,
-            "state": state_code,
             "floraEnabled": True,
             "source": "flora",
             "plantType": normalized_plant_type,
+            "plantQuery": normalized_plant_query,
             "filterRelaxed": filter_metadata["filterRelaxed"],
             "strictMatchCount": filter_metadata["strictMatchCount"],
+            "queryMetadata": filter_metadata.get("queryMetadata"),
         }
     )
 
