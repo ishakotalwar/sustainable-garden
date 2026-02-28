@@ -568,10 +568,110 @@ export default function HomeScreen() {
         </Pressable>
       </View>
 
-      {/* 1. GARDEN SETUP */}
+
+      {/* 1. CANVAS */}
       <View style={styles.sectionCard}>
         <View style={styles.sectionTitleRow}>
           <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>1</Text></View>
+          <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text style={styles.sectionTitle}>Layout Canvas</Text>
+            <Pressable onPress={clearCanvas} style={styles.clearBtn}>
+              <Text style={styles.clearBtnText}>Clear all</Text>
+            </Pressable>
+          </View>
+        </View>
+        <Text style={styles.hint}>Drag plants to arrange · tap to select and resize</Text>
+        <View style={styles.imageBlock}>
+          <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}>(optional)</Text></Text>
+          {/* <TextInput value={canvasImageInput} onChangeText={setCanvasImageInput} style={styles.imageInput} placeholder="https://example.com/backyard.jpg" autoCapitalize="none" autoCorrect={false} /> */}
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TextInput value={canvasImageInput} onChangeText={setCanvasImageInput} style={[styles.imageInput, { flex: 1 }]} placeholder="Backyard photo URL" autoCapitalize="none" autoCorrect={false} />
+            <TextInput value={zipCodeInput} onChangeText={setZipCodeInput} keyboardType="number-pad" maxLength={10} style={[styles.zipInput, { width: 90 }]} placeholder="ZIP" />
+          </View>
+          <View style={styles.imageButtonRow}>
+            <Pressable style={styles.imgBtnSecondary} onPress={uploadCanvasImageFromDevice}><Text style={styles.imgBtnSecondaryText}>Upload</Text></Pressable>
+            <Pressable style={styles.imgBtnPrimary} onPress={applyCanvasImage}><Text style={styles.imgBtnPrimaryText}>Use Image</Text></Pressable>
+            <Pressable style={styles.imgBtnDanger} onPress={removeCanvasImage}><Text style={styles.imgBtnDangerText}>Remove</Text></Pressable>
+          </View>
+          {canvasImageMessage
+            ? <Text style={canvasImageHasError ? styles.msgError : styles.msgInfo}>{canvasImageMessage}</Text>
+            : <Text style={styles.hint}>Upload from device or paste a hosted URL.</Text>}
+        </View>
+        <View style={styles.canvasShell}>
+          <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
+            {canvasImageUri ? (
+              <>
+                <Image source={{ uri: canvasImageUri }} style={StyleSheet.absoluteFillObject} resizeMode="cover"
+                  onLoad={(event) => {
+                    const source = event.nativeEvent?.source;
+                    const sourceWidth = Number(source?.width);
+                    const sourceHeight = Number(source?.height);
+                    if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
+                      fitCanvasToImage(sourceWidth, sourceHeight);
+                    }
+                    setCanvasImageMessage('Image loaded.');
+                    setCanvasImageHasError(false);
+                  }}
+                  onError={() => { setCanvasImageMessage('Could not load image. Check the URL.'); setCanvasImageHasError(true); }} />
+                <View pointerEvents="none" style={styles.canvasOverlay} />
+              </>
+            ) : null}
+            {/* {verticalGridLines.map((position, index) => (
+              <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
+            ))}
+            {horizontalGridLines.map((position, index) => (
+              <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
+            ))} */}
+            {placedPlants.map(item => {
+              const plant = plantsById[item.plantId];
+              if (!plant) return null;
+              return (
+                <DraggablePlant key={item.instanceId} item={item} plant={plant}
+                  selected={selectedPlantId === item.instanceId}
+                  canvasWidth={canvasWidth} canvasHeight={canvasHeight}
+                  onMove={movePlant} onSelect={setSelectedPlantId} />
+              );
+            })}
+            {placedPlants.length === 0 && (
+              <View style={styles.canvasEmpty}>
+                <Text style={styles.canvasEmptyIcon}>🌱</Text>
+                <Text style={styles.canvasEmptyText}>Add plants from section 2</Text>
+              </View>
+            )}
+            {recommendations.length > 0 && (
+              <View style={styles.canvasPlantOverlay}>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.canvasPlantOverlayScroll}>
+                  {recommendations.map(plant => (
+                    <Pressable key={plant.id} style={styles.canvasPlantChip} onPress={() => addPlantToCanvas(plant)}>
+                      <Text style={styles.canvasPlantChipEmoji}>{plant.emoji}</Text>
+                      <Text style={styles.canvasPlantChipName}>{plant.name}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
+          </View>
+        </View>
+        {selectedPlant && selectedPlantDetails ? (
+          <View style={styles.selPanel}>
+            <Text style={styles.selTitle}>{selectedPlantDetails.emoji} {selectedPlantDetails.name}</Text>
+            <View style={styles.selControls}>
+              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(-8)}><Text style={styles.selBtnText}>− Shrink</Text></Pressable>
+              <Text style={styles.selSize}>{selectedPlant.size}px</Text>
+              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(8)}><Text style={styles.selBtnText}>+ Grow</Text></Pressable>
+              <Pressable style={styles.selRemove} onPress={removeSelectedPlant}><Text style={styles.selRemoveText}>Remove</Text></Pressable>
+            </View>
+          </View>
+        ) : (
+          <Text style={styles.hint}>Tap a placed plant to resize or remove it.</Text>
+        )}
+      </View>
+
+
+      {/* 2. GARDEN SETUP */}
+      <View style={styles.sectionCard}>
+        <View style={styles.sectionTitleRow}>
+          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>2</Text></View>
           <Text style={styles.sectionTitle}>Garden Setup</Text>
         </View>
         <Text style={styles.hint}>Grid automatically fits the current canvas/image size.</Text>
@@ -600,10 +700,10 @@ export default function HomeScreen() {
           : <Text style={styles.hint}>Enter ZIP to pull climate-aware native plants via Flora API.</Text>}
       </View>
 
-      {/* 2. RECOMMENDED PLANTS */}
+      {/* 3. RECOMMENDED PLANTS */}
       <View style={styles.sectionCard}>
         <View style={styles.sectionTitleRow}>
-          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>2</Text></View>
+          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>3</Text></View>
           <Text style={styles.sectionTitle}>Recommended Plants</Text>
         </View>
         <Text style={styles.hint}>
@@ -639,88 +739,6 @@ export default function HomeScreen() {
               );
             })}
           </ScrollView>
-        )}
-      </View>
-
-      {/* 3. CANVAS */}
-      <View style={styles.sectionCard}>
-        <View style={styles.sectionTitleRow}>
-          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>3</Text></View>
-          <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text style={styles.sectionTitle}>Layout Canvas</Text>
-            <Pressable onPress={clearCanvas} style={styles.clearBtn}>
-              <Text style={styles.clearBtnText}>Clear all</Text>
-            </Pressable>
-          </View>
-        </View>
-        <Text style={styles.hint}>Drag plants to arrange · tap to select and resize</Text>
-        <View style={styles.imageBlock}>
-          <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}>(optional)</Text></Text>
-          <TextInput value={canvasImageInput} onChangeText={setCanvasImageInput} style={styles.imageInput} placeholder="https://example.com/backyard.jpg" autoCapitalize="none" autoCorrect={false} />
-          <View style={styles.imageButtonRow}>
-            <Pressable style={styles.imgBtnSecondary} onPress={uploadCanvasImageFromDevice}><Text style={styles.imgBtnSecondaryText}>Upload</Text></Pressable>
-            <Pressable style={styles.imgBtnPrimary} onPress={applyCanvasImage}><Text style={styles.imgBtnPrimaryText}>Use Image</Text></Pressable>
-            <Pressable style={styles.imgBtnDanger} onPress={removeCanvasImage}><Text style={styles.imgBtnDangerText}>Remove</Text></Pressable>
-          </View>
-          {canvasImageMessage
-            ? <Text style={canvasImageHasError ? styles.msgError : styles.msgInfo}>{canvasImageMessage}</Text>
-            : <Text style={styles.hint}>Upload from device or paste a hosted URL.</Text>}
-        </View>
-        <View style={styles.canvasShell}>
-          <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
-            {canvasImageUri ? (
-              <>
-                <Image source={{ uri: canvasImageUri }} style={StyleSheet.absoluteFillObject} resizeMode="cover"
-                  onLoad={(event) => {
-                    const source = event.nativeEvent?.source;
-                    const sourceWidth = Number(source?.width);
-                    const sourceHeight = Number(source?.height);
-                    if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
-                      fitCanvasToImage(sourceWidth, sourceHeight);
-                    }
-                    setCanvasImageMessage('Image loaded.');
-                    setCanvasImageHasError(false);
-                  }}
-                  onError={() => { setCanvasImageMessage('Could not load image. Check the URL.'); setCanvasImageHasError(true); }} />
-                <View pointerEvents="none" style={styles.canvasOverlay} />
-              </>
-            ) : null}
-            {verticalGridLines.map((position, index) => (
-              <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
-            ))}
-            {horizontalGridLines.map((position, index) => (
-              <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
-            ))}
-            {placedPlants.map(item => {
-              const plant = plantsById[item.plantId];
-              if (!plant) return null;
-              return (
-                <DraggablePlant key={item.instanceId} item={item} plant={plant}
-                  selected={selectedPlantId === item.instanceId}
-                  canvasWidth={canvasWidth} canvasHeight={canvasHeight}
-                  onMove={movePlant} onSelect={setSelectedPlantId} />
-              );
-            })}
-            {placedPlants.length === 0 && (
-              <View style={styles.canvasEmpty}>
-                <Text style={styles.canvasEmptyIcon}>🌱</Text>
-                <Text style={styles.canvasEmptyText}>Add plants from section 2</Text>
-              </View>
-            )}
-          </View>
-        </View>
-        {selectedPlant && selectedPlantDetails ? (
-          <View style={styles.selPanel}>
-            <Text style={styles.selTitle}>{selectedPlantDetails.emoji} {selectedPlantDetails.name}</Text>
-            <View style={styles.selControls}>
-              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(-8)}><Text style={styles.selBtnText}>− Shrink</Text></Pressable>
-              <Text style={styles.selSize}>{selectedPlant.size}px</Text>
-              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(8)}><Text style={styles.selBtnText}>+ Grow</Text></Pressable>
-              <Pressable style={styles.selRemove} onPress={removeSelectedPlant}><Text style={styles.selRemoveText}>Remove</Text></Pressable>
-            </View>
-          </View>
-        ) : (
-          <Text style={styles.hint}>Tap a placed plant to resize or remove it.</Text>
         )}
       </View>
 
@@ -873,6 +891,19 @@ getStartedText: {
   canvasEmpty: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 6 },
   canvasEmptyIcon: { fontSize: 32, opacity: 0.35 },
   canvasEmptyText: { color: '#b0a080', fontSize: 13 },
+  canvasPlantOverlay: {
+  position: 'absolute', bottom: 0, left: 0, right: 0,
+  backgroundColor: 'rgba(20, 30, 15, 0.55)',
+  paddingVertical: 8, zIndex: 10,
+},
+canvasPlantOverlayScroll: { paddingHorizontal: 10, gap: 8 },
+canvasPlantChip: {
+  alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.15)',
+  borderRadius: 12, paddingHorizontal: 10, paddingVertical: 6,
+  borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)', gap: 2,
+},
+canvasPlantChipEmoji: { fontSize: 22 },
+canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAlign: 'center', maxWidth: 60 },
   placedPlant: { position: 'absolute', borderRadius: 999, borderWidth: 2, borderColor: '#7a6848', backgroundColor: 'rgba(170,210,140,0.45)', alignItems: 'center', justifyContent: 'center', zIndex: 2 },
   placedPlantSelected: { borderColor: ACCENT_GREEN, backgroundColor: 'rgba(140,200,110,0.6)', borderWidth: 2.5 },
 
