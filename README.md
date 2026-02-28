@@ -1,2 +1,38 @@
 # sustainable-garden
-irvine hacks 
+
+Sustainable Garden Designer MVP with:
+- Expo/React frontend (`EcoScape/`)
+- Flask backend API (`backend/`)
+
+## 1) Run Flask backend
+
+```bash
+cd /Users/24ishak/Desktop/sustainable-garden
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python backend/app.py
+```
+
+Backend runs on `http://127.0.0.1:5001`.
+
+## 2) Run frontend (Expo)
+
+```bash
+cd /Users/24ishak/Desktop/sustainable-garden/EcoScape
+npm install
+npm run web
+```
+
+Optional API override:
+
+```bash
+EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:5001 npm run web
+```
+
+## Flask API endpoints
+
+- `GET /api/health`
+- `GET /api/config`
+- `GET /api/recommendations?climateId=irvine`
+- `POST /api/score`

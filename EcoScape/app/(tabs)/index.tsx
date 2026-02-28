@@ -1,98 +1,1327 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+type Rating = 'Low' | 'Medium' | 'High';
+type Region = 'CA' | 'Southwest' | 'PacificNW' | 'Southeast';
+
+type ClimateProfile = {
+  id: string;
+  label: string;
+  zone: string;
+  region: Region;
+};
+
+type Plant = {
+  id: string;
+  name: string;
+  emoji: string;
+  zones: string[];
+  nativeRegions: Region[];
+  waterUsage: Rating;
+  pollinatorValue: Rating;
+  carbonSequestration: Rating;
+  shadeCoverage: Rating;
+  droughtResistance: Rating;
+};
+
+type PlacedPlant = {
+  instanceId: string;
+  plantId: string;
+  x: number;
+  y: number;
+  size: number;
+};
+
+type SustainabilityMetrics = {
+  sustainabilityScore: number;
+  waterEfficiency: number;
+  pollinatorSupport: number;
+  nativePercent: number;
+  droughtResistance: number;
+  biodiversity: number;
+  carbonImpact: number;
+  weeklyWaterDemand: number;
+};
+
+type ApiConfigResponse = {
+  climateOptions: ClimateProfile[];
+  plantLibrary: Plant[];
+  constraints?: {
+    minGardenDimension?: number;
+    maxGardenDimension?: number;
+  };
+};
+
+type ApiRecommendationsResponse = {
+  climate: ClimateProfile;
+  plants: Plant[];
+};
+
+type ApiScoreResponse = {
+  climate: ClimateProfile;
+  metrics: SustainabilityMetrics;
+};
+
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:5001';
+
+const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
+  { id: 'irvine', label: 'Irvine, CA', zone: '10a', region: 'CA' },
+  { id: 'santa-barbara', label: 'Santa Barbara, CA', zone: '9b', region: 'CA' },
+  { id: 'phoenix', label: 'Phoenix, AZ', zone: '10b', region: 'Southwest' },
+  { id: 'seattle', label: 'Seattle, WA', zone: '8b', region: 'PacificNW' },
+];
+
+const DEFAULT_PLANT_LIBRARY: Plant[] = [
+  {
+    id: 'ceanothus',
+    name: 'California Lilac',
+    emoji: '🪻',
+    zones: ['8b', '9b', '10a'],
+    nativeRegions: ['CA'],
+    waterUsage: 'Low',
+    pollinatorValue: 'High',
+    carbonSequestration: 'Medium',
+    shadeCoverage: 'Medium',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'toyon',
+    name: 'Toyon',
+    emoji: '🌿',
+    zones: ['8b', '9b', '10a'],
+    nativeRegions: ['CA'],
+    waterUsage: 'Low',
+    pollinatorValue: 'High',
+    carbonSequestration: 'High',
+    shadeCoverage: 'Medium',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'manzanita',
+    name: 'Manzanita',
+    emoji: '🪴',
+    zones: ['8b', '9b', '10a'],
+    nativeRegions: ['CA'],
+    waterUsage: 'Low',
+    pollinatorValue: 'Medium',
+    carbonSequestration: 'Medium',
+    shadeCoverage: 'Low',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'yarrow',
+    name: 'Yarrow',
+    emoji: '🌼',
+    zones: ['8b', '9b', '10a', '10b'],
+    nativeRegions: ['CA', 'PacificNW'],
+    waterUsage: 'Low',
+    pollinatorValue: 'High',
+    carbonSequestration: 'Low',
+    shadeCoverage: 'Low',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'milkweed',
+    name: 'Narrowleaf Milkweed',
+    emoji: '🐝',
+    zones: ['9b', '10a', '10b'],
+    nativeRegions: ['CA', 'Southwest'],
+    waterUsage: 'Medium',
+    pollinatorValue: 'High',
+    carbonSequestration: 'Medium',
+    shadeCoverage: 'Low',
+    droughtResistance: 'Medium',
+  },
+  {
+    id: 'lavender',
+    name: 'Lavender',
+    emoji: '💜',
+    zones: ['8b', '9b', '10a', '10b'],
+    nativeRegions: ['CA', 'Southwest'],
+    waterUsage: 'Low',
+    pollinatorValue: 'High',
+    carbonSequestration: 'Medium',
+    shadeCoverage: 'Low',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'sage',
+    name: 'White Sage',
+    emoji: '🌱',
+    zones: ['8b', '9b', '10a', '10b'],
+    nativeRegions: ['CA', 'Southwest'],
+    waterUsage: 'Low',
+    pollinatorValue: 'High',
+    carbonSequestration: 'Low',
+    shadeCoverage: 'Low',
+    droughtResistance: 'High',
+  },
+  {
+    id: 'oregon-grape',
+    name: 'Oregon Grape',
+    emoji: '🍃',
+    zones: ['8b', '9b'],
+    nativeRegions: ['PacificNW'],
+    waterUsage: 'Medium',
+    pollinatorValue: 'Medium',
+    carbonSequestration: 'Medium',
+    shadeCoverage: 'Medium',
+    droughtResistance: 'Medium',
+  },
+  {
+    id: 'dwarf-citrus',
+    name: 'Dwarf Citrus',
+    emoji: '🍋',
+    zones: ['9b', '10a', '10b'],
+    nativeRegions: ['Southeast'],
+    waterUsage: 'High',
+    pollinatorValue: 'Medium',
+    carbonSequestration: 'High',
+    shadeCoverage: 'Medium',
+    droughtResistance: 'Low',
+  },
+];
+
+const WATER_EFFICIENCY_POINTS: Record<Rating, number> = {
+  Low: 100,
+  Medium: 70,
+  High: 35,
+};
+
+const RATING_POINTS: Record<Rating, number> = {
+  Low: 40,
+  Medium: 70,
+  High: 100,
+};
+
+const WATER_UNITS: Record<Rating, number> = {
+  Low: 1,
+  Medium: 2,
+  High: 3,
+};
+
+const EMPTY_METRICS: SustainabilityMetrics = {
+  sustainabilityScore: 0,
+  waterEfficiency: 0,
+  pollinatorSupport: 0,
+  nativePercent: 0,
+  droughtResistance: 0,
+  biodiversity: 0,
+  carbonImpact: 0,
+  weeklyWaterDemand: 0,
+};
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function parseGardenDimension(rawValue: string): number {
+  const parsed = Number.parseInt(rawValue, 10);
+  if (Number.isNaN(parsed)) {
+    return 10;
+  }
+  return Math.max(parsed, 1);
+}
+
+function describeScore(score: number): string {
+  if (score >= 85) {
+    return 'Excellent';
+  }
+  if (score >= 70) {
+    return 'High';
+  }
+  if (score >= 55) {
+    return 'Moderate';
+  }
+  return 'Needs work';
+}
+
+function scoreColor(score: number): string {
+  if (score >= 85) {
+    return '#0f8a5b';
+  }
+  if (score >= 70) {
+    return '#1f9d6b';
+  }
+  if (score >= 55) {
+    return '#c49320';
+  }
+  return '#c2410c';
+}
+
+function weightedAverage(values: number[], weights: number[]): number {
+  if (values.length === 0 || weights.length === 0) {
+    return 0;
+  }
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+  if (weightTotal <= 0) {
+    return 0;
+  }
+  return values.reduce((sum, value, index) => sum + value * (weights[index] ?? 0), 0) / weightTotal;
+}
+
+function recommendPlants(climate: ClimateProfile, plantLibrary: Plant[]): Plant[] {
+  const nativeByZone = plantLibrary.filter(
+    (plant) => plant.nativeRegions.includes(climate.region) && plant.zones.includes(climate.zone)
+  );
+  const adaptiveByZone = plantLibrary.filter(
+    (plant) => !plant.nativeRegions.includes(climate.region) && plant.zones.includes(climate.zone)
+  );
+  const nativeFallback = plantLibrary.filter(
+    (plant) => plant.nativeRegions.includes(climate.region) && !plant.zones.includes(climate.zone)
+  );
+
+  const ordered = [...nativeByZone, ...adaptiveByZone, ...nativeFallback];
+  const deduped = ordered.filter((plant, index) => ordered.findIndex((item) => item.id === plant.id) === index);
+  return deduped.slice(0, 8);
+}
+
+function computeMetrics(
+  placedPlants: PlacedPlant[],
+  plantsById: Record<string, Plant>,
+  climate: ClimateProfile
+): SustainabilityMetrics {
+  const resolvedPlants = placedPlants
+    .map((placedPlant) => {
+      const plant = plantsById[placedPlant.plantId];
+      if (!plant) {
+        return null;
+      }
+      return {
+        plant,
+        weight: clamp(placedPlant.size / 56, 0.6, 2.4),
+      };
+    })
+    .filter((entry): entry is { plant: Plant; weight: number } => Boolean(entry));
+
+  if (resolvedPlants.length === 0) {
+    return EMPTY_METRICS;
+  }
+
+  const plants = resolvedPlants.map((entry) => entry.plant);
+  const weights = resolvedPlants.map((entry) => entry.weight);
+  const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+
+  const waterEfficiency = Math.round(
+    weightedAverage(plants.map((plant) => WATER_EFFICIENCY_POINTS[plant.waterUsage]), weights)
+  );
+  const pollinatorSupport = Math.round(
+    weightedAverage(plants.map((plant) => RATING_POINTS[plant.pollinatorValue]), weights)
+  );
+  const droughtResistance = Math.round(
+    weightedAverage(plants.map((plant) => RATING_POINTS[plant.droughtResistance]), weights)
+  );
+  const carbonImpact = Math.round(weightedAverage(plants.map((plant) => RATING_POINTS[plant.carbonSequestration]), weights));
+  const nativeWeight = resolvedPlants
+    .filter((entry) => entry.plant.nativeRegions.includes(climate.region))
+    .reduce((sum, entry) => sum + entry.weight, 0);
+  const nativePercent = weightTotal > 0 ? Math.round((nativeWeight / weightTotal) * 100) : 0;
+  const uniqueSpecies = new Set(plants.map((plant) => plant.id)).size;
+  const biodiversity = Math.round(
+    clamp((uniqueSpecies / plants.length) * 70 + Math.min(uniqueSpecies, 6) * 5 + 25, 0, 100)
+  );
+  const weeklyWaterDemand = Math.round(
+    resolvedPlants.reduce(
+      (sum, entry) => sum + WATER_UNITS[entry.plant.waterUsage] * entry.weight,
+      0
+    )
+  );
+  const sustainabilityScore = Math.round(
+    nativePercent * 0.28 +
+      waterEfficiency * 0.24 +
+      pollinatorSupport * 0.16 +
+      droughtResistance * 0.14 +
+      biodiversity * 0.1 +
+      carbonImpact * 0.08
+  );
+
+  return {
+    sustainabilityScore,
+    waterEfficiency,
+    pollinatorSupport,
+    nativePercent,
+    droughtResistance,
+    biodiversity,
+    carbonImpact,
+    weeklyWaterDemand,
+  };
+}
+
+function defaultClimate(options: ClimateProfile[]): ClimateProfile {
+  return options[0] ?? DEFAULT_CLIMATE_OPTIONS[0];
+}
+
+type DraggablePlantProps = {
+  item: PlacedPlant;
+  plant: Plant;
+  selected: boolean;
+  canvasWidth: number;
+  canvasHeight: number;
+  onMove: (instanceId: string, x: number, y: number) => void;
+  onSelect: (instanceId: string) => void;
+};
+
+function DraggablePlant({
+  item,
+  plant,
+  selected,
+  canvasWidth,
+  canvasHeight,
+  onMove,
+  onSelect,
+}: DraggablePlantProps) {
+  const dragOrigin = useRef({ x: item.x, y: item.y });
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: () => {
+          dragOrigin.current = { x: item.x, y: item.y };
+          onSelect(item.instanceId);
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const maxX = Math.max(0, canvasWidth - item.size);
+          const maxY = Math.max(0, canvasHeight - item.size);
+          const nextX = clamp(dragOrigin.current.x + gestureState.dx, 0, maxX);
+          const nextY = clamp(dragOrigin.current.y + gestureState.dy, 0, maxY);
+          onMove(item.instanceId, nextX, nextY);
+        },
+      }),
+    [canvasHeight, canvasWidth, item.instanceId, item.size, item.x, item.y, onMove, onSelect]
+  );
+
+  return (
+    <View
+      {...panResponder.panHandlers}
+      style={[
+        styles.placedPlant,
+        selected ? styles.placedPlantSelected : undefined,
+        {
+          left: item.x,
+          top: item.y,
+          width: item.size,
+          height: item.size,
+        },
+      ]}>
+      <Text style={styles.placedPlantEmoji}>{plant.emoji}</Text>
+    </View>
+  );
+}
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const [widthInput, setWidthInput] = useState('10');
+  const [heightInput, setHeightInput] = useState('10');
+  const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
+  const [placedPlants, setPlacedPlants] = useState<PlacedPlant[]>([]);
+  const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
+  const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
+  const [plantLibrary, setPlantLibrary] = useState<Plant[]>(DEFAULT_PLANT_LIBRARY);
+  const [recommendations, setRecommendations] = useState<Plant[]>(
+    recommendPlants(defaultClimate(DEFAULT_CLIMATE_OPTIONS), DEFAULT_PLANT_LIBRARY)
+  );
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
+  const [backendMessage, setBackendMessage] = useState('Connecting to Flask API...');
+  const [apiMetrics, setApiMetrics] = useState<SustainabilityMetrics | null>(null);
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const selectedClimate = useMemo(
+    () => climateOptions.find((profile) => profile.id === selectedClimateId) ?? defaultClimate(climateOptions),
+    [climateOptions, selectedClimateId]
+  );
+
+  const gardenWidthFeet = parseGardenDimension(widthInput);
+  const gardenHeightFeet = parseGardenDimension(heightInput);
+  const gardenAreaSqFt = gardenWidthFeet * gardenHeightFeet;
+  const canvasWidthFeet = clamp(gardenWidthFeet, 6, 24);
+  const canvasHeightFeet = clamp(gardenHeightFeet, 6, 24);
+  const gridUnit = Math.max(12, Math.min(40, Math.floor(360 / Math.max(canvasWidthFeet, canvasHeightFeet))));
+  const canvasWidth = canvasWidthFeet * gridUnit;
+  const canvasHeight = canvasHeightFeet * gridUnit;
+
+  const plantsById = useMemo(
+    () =>
+      plantLibrary.reduce<Record<string, Plant>>((accumulator, plant) => {
+        accumulator[plant.id] = plant;
+        return accumulator;
+      }, {}),
+    [plantLibrary]
+  );
+  const fallbackMetrics = useMemo(
+    () => computeMetrics(placedPlants, plantsById, selectedClimate),
+    [placedPlants, plantsById, selectedClimate]
+  );
+  const metrics = useMemo(() => apiMetrics ?? fallbackMetrics, [apiMetrics, fallbackMetrics]);
+  const scoreSignature = useMemo(
+    () => placedPlants.map((plant) => `${plant.plantId}:${Math.round(plant.size)}`).join('|'),
+    [placedPlants]
+  );
+
+  const selectedPlant = placedPlants.find((plant) => plant.instanceId === selectedPlantId) ?? null;
+  const selectedPlantDetails = selectedPlant ? plantsById[selectedPlant.plantId] : null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadConfig() {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/config`);
+        if (!response.ok) {
+          throw new Error(`Config request failed: ${response.status}`);
+        }
+        const payload = (await response.json()) as ApiConfigResponse;
+        if (cancelled) {
+          return;
+        }
+
+        const nextClimateOptions = payload.climateOptions?.length
+          ? payload.climateOptions
+          : DEFAULT_CLIMATE_OPTIONS;
+        const nextPlantLibrary = payload.plantLibrary?.length ? payload.plantLibrary : DEFAULT_PLANT_LIBRARY;
+
+        setClimateOptions(nextClimateOptions);
+        setPlantLibrary(nextPlantLibrary);
+        setSelectedClimateId((currentId) =>
+          nextClimateOptions.some((profile) => profile.id === currentId)
+            ? currentId
+            : defaultClimate(nextClimateOptions).id
+        );
+        setBackendStatus('connected');
+        setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        setClimateOptions(DEFAULT_CLIMATE_OPTIONS);
+        setPlantLibrary(DEFAULT_PLANT_LIBRARY);
+        setBackendStatus('offline');
+        setBackendMessage('Flask API not reachable. Using local fallback model.');
+      }
+    }
+
+    loadConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRecommendations() {
+      if (backendStatus !== 'connected') {
+        setRecommendations(recommendPlants(selectedClimate, plantLibrary));
+        return;
+      }
+
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/api/recommendations?climateId=${encodeURIComponent(selectedClimate.id)}`
+        );
+        if (!response.ok) {
+          throw new Error(`Recommendation request failed: ${response.status}`);
+        }
+        const payload = (await response.json()) as ApiRecommendationsResponse;
+        if (cancelled) {
+          return;
+        }
+        setRecommendations(
+          payload.plants?.length ? payload.plants : recommendPlants(selectedClimate, plantLibrary)
+        );
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        setRecommendations(recommendPlants(selectedClimate, plantLibrary));
+        setBackendStatus('offline');
+        setBackendMessage('Recommendation API offline. Using local recommendation engine.');
+      }
+    }
+
+    loadRecommendations();
+    return () => {
+      cancelled = true;
+    };
+  }, [backendStatus, plantLibrary, selectedClimate]);
+
+  useEffect(() => {
+    if (backendStatus !== 'connected') {
+      setApiMetrics(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/score`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            climateId: selectedClimate.id,
+            placedPlants: scoreSignature
+              ? scoreSignature.split('|').map((entry) => {
+                  const [plantId, sizeValue] = entry.split(':');
+                  return {
+                    plantId,
+                    size: Number(sizeValue),
+                  };
+                })
+              : [],
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Score request failed: ${response.status}`);
+        }
+        const payload = (await response.json()) as ApiScoreResponse;
+        if (cancelled) {
+          return;
+        }
+        setApiMetrics(payload.metrics);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        setApiMetrics(null);
+        setBackendStatus('offline');
+        setBackendMessage('Score API offline. Using local scoring model.');
+      }
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [backendStatus, scoreSignature, selectedClimate.id]);
+
+  useEffect(() => {
+    setPlacedPlants((currentPlants) => {
+      let hasChanges = false;
+      const constrainedPlants = currentPlants.map((plant) => {
+        const maxX = Math.max(0, canvasWidth - plant.size);
+        const maxY = Math.max(0, canvasHeight - plant.size);
+        const nextX = clamp(plant.x, 0, maxX);
+        const nextY = clamp(plant.y, 0, maxY);
+        if (nextX === plant.x && nextY === plant.y) {
+          return plant;
+        }
+        hasChanges = true;
+        return { ...plant, x: nextX, y: nextY };
+      });
+      return hasChanges ? constrainedPlants : currentPlants;
+    });
+  }, [canvasHeight, canvasWidth]);
+
+  function addPlantToCanvas(plant: Plant) {
+    const size = 56;
+    const instanceId = `${plant.id}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    setPlacedPlants((currentPlants) => {
+      const stackIndex = currentPlants.length;
+      const startX = clamp(16 + (stackIndex % 4) * (size + 12), 0, Math.max(0, canvasWidth - size));
+      const startY = clamp(
+        16 + Math.floor(stackIndex / 4) * (size + 12),
+        0,
+        Math.max(0, canvasHeight - size)
+      );
+      return [
+        ...currentPlants,
+        {
+          instanceId,
+          plantId: plant.id,
+          x: startX,
+          y: startY,
+          size,
+        },
+      ];
+    });
+    setSelectedPlantId(instanceId);
+  }
+
+  function movePlant(instanceId: string, x: number, y: number) {
+    setPlacedPlants((currentPlants) =>
+      currentPlants.map((plant) => {
+        if (plant.instanceId !== instanceId) {
+          return plant;
+        }
+        if (plant.x === x && plant.y === y) {
+          return plant;
+        }
+        return { ...plant, x, y };
+      })
+    );
+  }
+
+  function resizeSelectedPlant(delta: number) {
+    if (!selectedPlantId) {
+      return;
+    }
+
+    setPlacedPlants((currentPlants) =>
+      currentPlants.map((plant) => {
+        if (plant.instanceId !== selectedPlantId) {
+          return plant;
+        }
+
+        const nextSize = clamp(plant.size + delta, 34, 120);
+        const maxX = Math.max(0, canvasWidth - nextSize);
+        const maxY = Math.max(0, canvasHeight - nextSize);
+
+        return {
+          ...plant,
+          size: nextSize,
+          x: clamp(plant.x, 0, maxX),
+          y: clamp(plant.y, 0, maxY),
+        };
+      })
+    );
+  }
+
+  function removeSelectedPlant() {
+    if (!selectedPlantId) {
+      return;
+    }
+    setPlacedPlants((currentPlants) => currentPlants.filter((plant) => plant.instanceId !== selectedPlantId));
+    setSelectedPlantId(null);
+  }
+
+  function clearCanvas() {
+    setPlacedPlants([]);
+    setSelectedPlantId(null);
+  }
+
+  return (
+    <ScrollView style={styles.page} contentContainerStyle={styles.pageContent}>
+      <View style={styles.heroCard}>
+        <Text style={styles.heroKicker}>Sustainable Garden Designer</Text>
+        <Text style={styles.heroTitle}>Design your layout, then optimize its eco impact.</Text>
+        <Text style={styles.heroSubtitle}>
+          Pick your location, drag plants onto the grid, resize coverage, and watch live scores update.
+        </Text>
+        <View
+          style={[
+            styles.backendBadge,
+            backendStatus === 'connected'
+              ? styles.backendBadgeConnected
+              : backendStatus === 'checking'
+                ? styles.backendBadgeChecking
+                : styles.backendBadgeOffline,
+          ]}>
+          <Text style={styles.backendBadgeTitle}>
+            Backend: {backendStatus === 'connected' ? 'Flask connected' : 'Local fallback'}
+          </Text>
+          <Text style={styles.backendBadgeText}>{backendMessage}</Text>
+        </View>
+      </View>
+
+      <View style={styles.sectionCard}>
+        <Text style={styles.sectionTitle}>1. Garden Setup</Text>
+        <View style={styles.dimensionRow}>
+          <View style={styles.dimensionField}>
+            <Text style={styles.dimensionLabel}>Width (ft)</Text>
+            <TextInput
+              value={widthInput}
+              onChangeText={setWidthInput}
+              keyboardType="number-pad"
+              style={styles.dimensionInput}
+              placeholder="10"
+            />
+          </View>
+          <View style={styles.dimensionField}>
+            <Text style={styles.dimensionLabel}>Height (ft)</Text>
+            <TextInput
+              value={heightInput}
+              onChangeText={setHeightInput}
+              keyboardType="number-pad"
+              style={styles.dimensionInput}
+              placeholder="10"
+            />
+          </View>
+          <View style={styles.dimensionSummary}>
+            <Text style={styles.dimensionSummaryLabel}>Area</Text>
+            <Text style={styles.dimensionSummaryValue}>{gardenAreaSqFt} sq ft</Text>
+          </View>
+        </View>
+        <Text style={styles.sectionHint}>Area is raw from your inputs. Canvas preview is capped at 24x24 ft.</Text>
+
+        <Text style={styles.sectionHint}>Climate Zone / Location</Text>
+        <View style={styles.climateGrid}>
+          {climateOptions.map((profile) => {
+            const isSelected = profile.id === selectedClimate.id;
+            return (
+              <Pressable
+                key={profile.id}
+                onPress={() => setSelectedClimateId(profile.id)}
+                style={[styles.climateChip, isSelected ? styles.climateChipSelected : undefined]}>
+                <Text style={[styles.climateChipTitle, isSelected ? styles.climateChipTitleSelected : undefined]}>
+                  {profile.label}
+                </Text>
+                <Text style={[styles.climateChipMeta, isSelected ? styles.climateChipMetaSelected : undefined]}>
+                  Zone {profile.zone}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={styles.sectionCard}>
+        <Text style={styles.sectionTitle}>2. Recommended Plants</Text>
+        <Text style={styles.sectionHint}>Native picks appear first for {selectedClimate.label}.</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.plantList}>
+          {recommendations.map((plant) => {
+            const isNative = plant.nativeRegions.includes(selectedClimate.region);
+            return (
+              <View key={plant.id} style={styles.plantCard}>
+                <Text style={styles.plantName}>
+                  {plant.emoji} {plant.name}
+                </Text>
+                <Text style={styles.plantMeta}>
+                  {isNative ? 'Native match' : 'Adaptive pick'} • Water {plant.waterUsage}
+                </Text>
+                <Text style={styles.plantMeta}>
+                  Pollinators {plant.pollinatorValue} • Drought {plant.droughtResistance}
+                </Text>
+                <Pressable style={styles.addButton} onPress={() => addPlantToCanvas(plant)}>
+                  <Text style={styles.addButtonText}>Add to Canvas</Text>
+                </Pressable>
+              </View>
+            );
+          })}
+        </ScrollView>
+      </View>
+
+      <View style={styles.sectionCard}>
+        <View style={styles.canvasHeader}>
+          <Text style={styles.sectionTitle}>3. Visual Layout Tool</Text>
+          <Pressable style={styles.clearButton} onPress={clearCanvas}>
+            <Text style={styles.clearButtonText}>Clear</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.sectionHint}>
+          Drag plants to arrange them. Select one to resize or remove it from your design.
+        </Text>
+
+        <View style={styles.canvasShell}>
+          <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
+            {Array.from({ length: canvasWidthFeet + 1 }, (_, index) => (
+              <View
+                key={`vertical-${index}`}
+                style={[
+                  styles.gridLineVertical,
+                  {
+                    left: index * gridUnit,
+                  },
+                ]}
+              />
+            ))}
+            {Array.from({ length: canvasHeightFeet + 1 }, (_, index) => (
+              <View
+                key={`horizontal-${index}`}
+                style={[
+                  styles.gridLineHorizontal,
+                  {
+                    top: index * gridUnit,
+                  },
+                ]}
+              />
+            ))}
+
+            {placedPlants.map((item) => {
+              const plant = plantsById[item.plantId];
+              if (!plant) {
+                return null;
+              }
+              return (
+                <DraggablePlant
+                  key={item.instanceId}
+                  item={item}
+                  plant={plant}
+                  selected={selectedPlantId === item.instanceId}
+                  canvasWidth={canvasWidth}
+                  canvasHeight={canvasHeight}
+                  onMove={movePlant}
+                  onSelect={setSelectedPlantId}
+                />
+              );
+            })}
+
+            {placedPlants.length === 0 ? (
+              <View style={styles.canvasPlaceholder}>
+                <Text style={styles.canvasPlaceholderText}>Add plants from the recommendation list.</Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+
+        {selectedPlant && selectedPlantDetails ? (
+          <View style={styles.selectionPanel}>
+            <Text style={styles.selectionTitle}>
+              Selected: {selectedPlantDetails.emoji} {selectedPlantDetails.name}
+            </Text>
+            <View style={styles.selectionControls}>
+              <Pressable style={styles.adjustButton} onPress={() => resizeSelectedPlant(-8)}>
+                <Text style={styles.adjustButtonText}>- Size</Text>
+              </Pressable>
+              <Text style={styles.selectionSize}>Diameter {selectedPlant.size}px</Text>
+              <Pressable style={styles.adjustButton} onPress={() => resizeSelectedPlant(8)}>
+                <Text style={styles.adjustButtonText}>+ Size</Text>
+              </Pressable>
+              <Pressable style={styles.removeButton} onPress={removeSelectedPlant}>
+                <Text style={styles.removeButtonText}>Remove</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : (
+          <Text style={styles.sectionHint}>Tap any placed plant to resize or remove it.</Text>
+        )}
+      </View>
+
+      <View style={styles.scoreCard}>
+        <Text style={styles.sectionTitle}>4. Sustainability Intelligence</Text>
+        <View style={styles.scoreHero}>
+          <Text style={styles.scoreHeroLabel}>Sustainability Score</Text>
+          <Text style={styles.scoreHeroValue}>{metrics.sustainabilityScore}/100</Text>
+          <Text style={[styles.scoreHeroPill, { backgroundColor: scoreColor(metrics.sustainabilityScore) }]}>
+            {describeScore(metrics.sustainabilityScore)}
+          </Text>
+        </View>
+
+        <View style={styles.metricGrid}>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>💧 Water Efficiency</Text>
+            <Text style={styles.metricValue}>
+              {describeScore(metrics.waterEfficiency)} ({metrics.waterEfficiency})
+            </Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>🐝 Pollinator Support</Text>
+            <Text style={styles.metricValue}>
+              {describeScore(metrics.pollinatorSupport)} ({metrics.pollinatorSupport})
+            </Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>🌿 Native Plant %</Text>
+            <Text style={styles.metricValue}>{metrics.nativePercent}%</Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>☀️ Drought Resistance</Text>
+            <Text style={styles.metricValue}>
+              {describeScore(metrics.droughtResistance)} ({metrics.droughtResistance})
+            </Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>🌍 Biodiversity Mix</Text>
+            <Text style={styles.metricValue}>
+              {describeScore(metrics.biodiversity)} ({metrics.biodiversity})
+            </Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>🌳 Carbon Impact</Text>
+            <Text style={styles.metricValue}>
+              {describeScore(metrics.carbonImpact)} ({metrics.carbonImpact})
+            </Text>
+          </View>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>🚿 Weekly Water Demand</Text>
+            <Text style={styles.metricValue}>{metrics.weeklyWaterDemand} units</Text>
+          </View>
+        </View>
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  page: {
+    flex: 1,
+    backgroundColor: '#eef7ef',
   },
-  stepContainer: {
-    gap: 8,
+  pageContent: {
+    paddingHorizontal: 16,
+    paddingTop: 22,
+    paddingBottom: 40,
+    gap: 14,
+  },
+  heroCard: {
+    backgroundColor: '#0f3d2d',
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 20,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  heroKicker: {
+    color: '#9ce7b6',
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  heroTitle: {
+    color: '#f1fff5',
+    fontSize: 26,
+    fontWeight: '800',
+    lineHeight: 32,
     marginBottom: 8,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
+  heroSubtitle: {
+    color: '#ccead7',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  backendBadge: {
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  backendBadgeConnected: {
+    borderColor: '#45b57d',
+    backgroundColor: '#0d5b3d',
+  },
+  backendBadgeChecking: {
+    borderColor: '#a88f39',
+    backgroundColor: '#5b4f17',
+  },
+  backendBadgeOffline: {
+    borderColor: '#d18f6f',
+    backgroundColor: '#5a2f20',
+  },
+  backendBadgeTitle: {
+    color: '#f5fff8',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  backendBadgeText: {
+    marginTop: 2,
+    color: '#d7f0df',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  sectionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#d9e9dd',
+    padding: 14,
+    gap: 10,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#173a2b',
+  },
+  sectionHint: {
+    color: '#4f6759',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  dimensionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'flex-end',
+  },
+  dimensionField: {
+    flex: 1,
+    gap: 6,
+  },
+  dimensionLabel: {
+    color: '#304f3d',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  dimensionInput: {
+    borderWidth: 1,
+    borderColor: '#b8d5c1',
+    borderRadius: 12,
+    backgroundColor: '#f4fbf5',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: '#12271d',
+    fontWeight: '700',
+  },
+  dimensionSummary: {
+    minWidth: 96,
+    backgroundColor: '#e7f6ea',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#c9e8d1',
+  },
+  dimensionSummaryLabel: {
+    fontSize: 11,
+    color: '#3f6a52',
+    fontWeight: '600',
+  },
+  dimensionSummaryValue: {
+    fontSize: 16,
+    color: '#175337',
+    fontWeight: '800',
+    marginTop: 2,
+  },
+  climateGrid: {
+    gap: 8,
+  },
+  climateChip: {
+    borderWidth: 1,
+    borderColor: '#cde3d3',
+    backgroundColor: '#f6fcf7',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  climateChipSelected: {
+    borderColor: '#0f8a5b',
+    backgroundColor: '#e6f9ee',
+  },
+  climateChipTitle: {
+    fontSize: 14,
+    color: '#2f5040',
+    fontWeight: '700',
+  },
+  climateChipTitleSelected: {
+    color: '#0f6845',
+  },
+  climateChipMeta: {
+    marginTop: 2,
+    fontSize: 12,
+    color: '#567b66',
+  },
+  climateChipMetaSelected: {
+    color: '#228657',
+  },
+  plantList: {
+    gap: 10,
+    paddingRight: 8,
+  },
+  plantCard: {
+    width: 230,
+    borderWidth: 1,
+    borderColor: '#cfe5d5',
+    borderRadius: 14,
+    padding: 12,
+    backgroundColor: '#f8fdf9',
+    gap: 5,
+  },
+  plantName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1a4733',
+  },
+  plantMeta: {
+    fontSize: 12,
+    color: '#4e6a59',
+  },
+  addButton: {
+    marginTop: 6,
+    borderRadius: 10,
+    backgroundColor: '#116f49',
+    paddingVertical: 9,
+    alignItems: 'center',
+  },
+  addButtonText: {
+    color: '#edfff4',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  canvasHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  clearButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d4e5d8',
+    backgroundColor: '#f6fcf7',
+  },
+  clearButtonText: {
+    fontSize: 12,
+    color: '#2f5240',
+    fontWeight: '700',
+  },
+  canvasShell: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#cbe2d1',
+    backgroundColor: '#edf7ef',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+  },
+  canvas: {
+    position: 'relative',
+    borderWidth: 2,
+    borderColor: '#95bba0',
+    borderRadius: 12,
+    backgroundColor: '#f8fff8',
+    overflow: 'hidden',
+  },
+  gridLineVertical: {
     position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 1,
+    backgroundColor: '#d8e9db',
+  },
+  gridLineHorizontal: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: '#d8e9db',
+  },
+  canvasPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  canvasPlaceholderText: {
+    color: '#64806d',
+    textAlign: 'center',
+    fontSize: 13,
+  },
+  placedPlant: {
+    position: 'absolute',
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#315446',
+    backgroundColor: '#d5f0de',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+  },
+  placedPlantSelected: {
+    borderColor: '#0a7e52',
+    backgroundColor: '#c0efd0',
+    transform: [{ scale: 1.03 }],
+  },
+  placedPlantEmoji: {
+    fontSize: 22,
+  },
+  selectionPanel: {
+    marginTop: 2,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#cfe4d4',
+    backgroundColor: '#f4fbf6',
+    padding: 10,
+    gap: 8,
+  },
+  selectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1f4836',
+  },
+  selectionControls: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    alignItems: 'center',
+  },
+  adjustButton: {
+    backgroundColor: '#166f4b',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  adjustButtonText: {
+    color: '#effff4',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  selectionSize: {
+    color: '#27513d',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  removeButton: {
+    borderWidth: 1,
+    borderColor: '#d9b0a2',
+    backgroundColor: '#fff5f2',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  removeButtonText: {
+    color: '#9f3412',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  scoreCard: {
+    backgroundColor: '#153726',
+    borderRadius: 18,
+    padding: 16,
+    gap: 12,
+  },
+  scoreHero: {
+    backgroundColor: '#1f5138',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#2c6a4b',
+  },
+  scoreHeroLabel: {
+    color: '#c7ebd5',
+    fontSize: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    fontWeight: '700',
+  },
+  scoreHeroValue: {
+    marginTop: 6,
+    color: '#effff4',
+    fontSize: 36,
+    fontWeight: '900',
+  },
+  scoreHeroPill: {
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    color: '#ffffff',
+    overflow: 'hidden',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  metricGrid: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2b684a',
+    backgroundColor: '#1c4632',
+    overflow: 'hidden',
+  },
+  metricRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#275a42',
+  },
+  metricLabel: {
+    color: '#cfe9d8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  metricValue: {
+    color: '#f3fff7',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });
