@@ -56,6 +56,7 @@ type SustainabilityMetrics = {
 type ApiConfigResponse = {
   climateOptions: ClimateProfile[];
   plantLibrary: Plant[];
+  plantTypeOptions?: { id: string; label: string }[];
   constraints?: {
     minGardenDimension?: number;
     maxGardenDimension?: number;
@@ -75,6 +76,9 @@ type ApiRecommendationsResponse = {
   state?: string;
   source?: 'flora' | 'local';
   floraEnabled?: boolean;
+  plantType?: string | null;
+  filterRelaxed?: boolean;
+  strictMatchCount?: number;
   error?: string;
   detail?: string;
 };
@@ -91,6 +95,17 @@ const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
   { id: 'santa-barbara', label: 'Santa Barbara, CA', zone: '9b', region: 'CA' },
   { id: 'phoenix', label: 'Phoenix, AZ', zone: '10b', region: 'Southwest' },
   { id: 'seattle', label: 'Seattle, WA', zone: '8b', region: 'PacificNW' },
+];
+
+const DEFAULT_PLANT_TYPE_OPTIONS: { id: string; label: string }[] = [
+  { id: 'any', label: 'Any' },
+  { id: 'flower', label: 'Flower' },
+  { id: 'fruit', label: 'Fruit' },
+  { id: 'bush', label: 'Bush' },
+  { id: 'tree', label: 'Tree' },
+  { id: 'vine', label: 'Vine' },
+  { id: 'grass', label: 'Grass' },
+  { id: 'succulent', label: 'Succulent' },
 ];
 
 const DEFAULT_PLANT_LIBRARY: Plant[] = [
@@ -443,6 +458,8 @@ export default function HomeScreen() {
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
   const [zipCodeInput, setZipCodeInput] = useState('');
   const [activeZipCode, setActiveZipCode] = useState<string | null>(null);
+  const [selectedPlantType, setSelectedPlantType] = useState('any');
+  const [plantTypeOptions, setPlantTypeOptions] = useState(DEFAULT_PLANT_TYPE_OPTIONS);
   const [zipLookupLoading, setZipLookupLoading] = useState(false);
   const [zipLookupMessage, setZipLookupMessage] = useState<string | null>(null);
   const [zipLookupError, setZipLookupError] = useState(false);
@@ -461,6 +478,10 @@ export default function HomeScreen() {
   const selectedClimate = useMemo(
     () => climateOptions.find((profile) => profile.id === selectedClimateId) ?? defaultClimate(climateOptions),
     [climateOptions, selectedClimateId]
+  );
+  const selectedPlantTypeLabel = useMemo(
+    () => plantTypeOptions.find((option) => option.id === selectedPlantType)?.label ?? 'Any',
+    [plantTypeOptions, selectedPlantType]
   );
 
   const gardenWidthFeet = parseGardenDimension(widthInput);
@@ -511,9 +532,20 @@ export default function HomeScreen() {
           ? payload.climateOptions
           : DEFAULT_CLIMATE_OPTIONS;
         const nextPlantLibrary = payload.plantLibrary?.length ? payload.plantLibrary : DEFAULT_PLANT_LIBRARY;
+        const serverPlantTypeOptions = payload.plantTypeOptions?.length
+          ? payload.plantTypeOptions
+          : DEFAULT_PLANT_TYPE_OPTIONS.filter((option) => option.id !== 'any');
+        const nextPlantTypeOptions = [
+          DEFAULT_PLANT_TYPE_OPTIONS[0],
+          ...serverPlantTypeOptions.filter((option) => option.id !== 'any'),
+        ];
 
         setClimateOptions(nextClimateOptions);
         setPlantLibrary(nextPlantLibrary);
+        setPlantTypeOptions(nextPlantTypeOptions);
+        setSelectedPlantType((currentType) =>
+          nextPlantTypeOptions.some((option) => option.id === currentType) ? currentType : 'any'
+        );
         setSelectedClimateId((currentId) =>
           nextClimateOptions.some((profile) => profile.id === currentId)
             ? currentId
@@ -527,6 +559,7 @@ export default function HomeScreen() {
         }
         setClimateOptions(DEFAULT_CLIMATE_OPTIONS);
         setPlantLibrary(DEFAULT_PLANT_LIBRARY);
+        setPlantTypeOptions(DEFAULT_PLANT_TYPE_OPTIONS);
         setBackendStatus('offline');
         setBackendMessage('Flask API not reachable. Using local fallback model.');
       }
@@ -789,11 +822,17 @@ export default function HomeScreen() {
 
     setZipLookupLoading(true);
     setZipLookupError(false);
-    setZipLookupMessage('Looking up Flora recommendations by ZIP...');
+    setZipLookupMessage(
+      selectedPlantType === 'any'
+        ? 'Looking up Flora recommendations by ZIP...'
+        : `Looking up ${selectedPlantTypeLabel.toLowerCase()} recommendations by ZIP...`
+    );
 
     try {
+      const typeParam =
+        selectedPlantType !== 'any' ? `&plantType=${encodeURIComponent(selectedPlantType)}` : '';
       const response = await fetch(
-        `${API_BASE_URL}/api/recommendations/zipcode?zipCode=${encodeURIComponent(normalizedZipCode)}`
+        `${API_BASE_URL}/api/recommendations/zipcode?zipCode=${encodeURIComponent(normalizedZipCode)}${typeParam}`
       );
       const payload = (await response.json()) as ApiRecommendationsResponse;
       if (!response.ok || payload.error) {
@@ -813,11 +852,19 @@ export default function HomeScreen() {
       setActiveZipCode(normalizedZipCode);
       setZipCodeInput(normalizedZipCode);
       setZipLookupError(false);
-      setZipLookupMessage(
-        `Loaded ${payload.plants.length} Flora recommendations for ZIP ${normalizedZipCode}${
-          payload.state ? ` (${payload.state})` : ''
-        }.`
-      );
+      const baseMessage =
+        selectedPlantType === 'any'
+          ? `Loaded ${payload.plants.length} Flora recommendation${
+              payload.plants.length === 1 ? '' : 's'
+            } for ZIP ${normalizedZipCode}${payload.state ? ` (${payload.state})` : ''}.`
+          : `Loaded ${payload.plants.length} ${selectedPlantTypeLabel.toLowerCase()} recommendation${
+              payload.plants.length === 1 ? '' : 's'
+            } for ZIP ${normalizedZipCode}${payload.state ? ` (${payload.state})` : ''}.`;
+      const matchNote =
+        selectedPlantType !== 'any' && payload.filterRelaxed
+          ? ' Flora returned limited type metadata, so these are closest native matches.'
+          : '';
+      setZipLookupMessage(`${baseMessage}${matchNote}`);
       setBackendStatus('connected');
       setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
     } catch (error) {
@@ -884,6 +931,38 @@ export default function HomeScreen() {
         </View>
         <Text style={styles.sectionHint}>Area is raw from your inputs. Canvas preview is capped at 24x24 ft.</Text>
 
+        <View style={styles.plantTypeCard}>
+          <Text style={styles.dimensionLabel}>Plant Type Preference</Text>
+          <View style={styles.plantTypeRow}>
+            {plantTypeOptions.map((option) => {
+              const isSelected = option.id === selectedPlantType;
+              return (
+                <Pressable
+                  key={option.id}
+                  onPress={() => {
+                    setSelectedPlantType(option.id);
+                    if (activeZipCode) {
+                      setZipLookupError(false);
+                      setZipLookupMessage(
+                        `Plant type set to ${option.label}. Click Use ZIP to refresh recommendations.`
+                      );
+                    }
+                  }}
+                  style={[styles.plantTypeChip, isSelected ? styles.plantTypeChipSelected : undefined]}>
+                  <Text
+                    style={[
+                      styles.plantTypeChipText,
+                      isSelected ? styles.plantTypeChipTextSelected : undefined,
+                    ]}>
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <Text style={styles.sectionHint}>Choose what you want to plant before ZIP lookup.</Text>
+        </View>
+
         <View style={styles.zipLookupCard}>
           <Text style={styles.dimensionLabel}>ZIP Code (Flora API)</Text>
           <View style={styles.zipLookupRow}>
@@ -918,8 +997,10 @@ export default function HomeScreen() {
         <Text style={styles.sectionTitle}>2. Recommended Plants</Text>
         <Text style={styles.sectionHint}>
           {activeZipCode
-            ? `ZIP-based Flora recommendations for ${selectedClimate.label}.`
-            : 'Enter a ZIP code above to load Flora recommendations.'}
+            ? selectedPlantType === 'any'
+              ? `ZIP-based Flora recommendations for ${selectedClimate.label}.`
+              : `ZIP-based ${selectedPlantTypeLabel.toLowerCase()} recommendations for ${selectedClimate.label}.`
+            : 'Set a plant type and enter a ZIP code above to load Flora recommendations.'}
         </Text>
         {recommendations.length === 0 ? (
           <View style={styles.emptyRecommendationsCard}>
@@ -1277,6 +1358,39 @@ const styles = StyleSheet.create({
     color: '#175337',
     fontWeight: '800',
     marginTop: 2,
+  },
+  plantTypeCard: {
+    borderWidth: 1,
+    borderColor: '#cde2d4',
+    borderRadius: 12,
+    backgroundColor: '#f6fcf7',
+    padding: 10,
+    gap: 8,
+  },
+  plantTypeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  plantTypeChip: {
+    borderWidth: 1,
+    borderColor: '#c6ddd0',
+    backgroundColor: '#ffffff',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  plantTypeChipSelected: {
+    borderColor: '#0f8a5b',
+    backgroundColor: '#e6f9ee',
+  },
+  plantTypeChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#365747',
+  },
+  plantTypeChipTextSelected: {
+    color: '#0f6845',
   },
   zipLookupCard: {
     borderWidth: 1,

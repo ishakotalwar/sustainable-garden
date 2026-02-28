@@ -181,6 +181,44 @@ WATER_EFFICIENCY_POINTS = {"Low": 100, "Medium": 70, "High": 35}
 RATING_POINTS = {"Low": 40, "Medium": 70, "High": 100}
 WATER_UNITS = {"Low": 1, "Medium": 2, "High": 3}
 
+PLANT_TYPE_OPTIONS: dict[str, dict[str, Any]] = {
+    "flower": {
+        "label": "Flower",
+        "flora_habit": "forb",
+        "keywords": ("flower", "forb", "wildflower", "blossom"),
+    },
+    "fruit": {
+        "label": "Fruit",
+        "flora_habit": None,
+        "keywords": ("fruit", "berry", "citrus", "grape", "apple", "fig", "plum", "peach"),
+    },
+    "bush": {
+        "label": "Bush",
+        "flora_habit": "shrub",
+        "keywords": ("shrub", "bush"),
+    },
+    "tree": {
+        "label": "Tree",
+        "flora_habit": "tree",
+        "keywords": ("tree", "oak", "pine", "maple"),
+    },
+    "vine": {
+        "label": "Vine",
+        "flora_habit": "vine",
+        "keywords": ("vine", "climber", "creeper"),
+    },
+    "grass": {
+        "label": "Grass",
+        "flora_habit": "grass",
+        "keywords": ("grass", "sedge", "rush"),
+    },
+    "succulent": {
+        "label": "Succulent",
+        "flora_habit": "succulent",
+        "keywords": ("succulent", "cactus", "agave", "aloe"),
+    },
+}
+
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(value, max_value))
@@ -230,6 +268,107 @@ def normalize_zip_code(raw_zip: str | None) -> str | None:
     if len(digits) < 5:
         return None
     return digits[:5]
+
+
+def normalize_plant_type(raw_plant_type: str | None) -> str | None:
+    if not raw_plant_type:
+        return None
+    normalized = raw_plant_type.strip().lower().replace(" ", "-")
+    if normalized in ("any", "all", "none"):
+        return None
+    if normalized in PLANT_TYPE_OPTIONS:
+        return normalized
+    aliases = {
+        "flowers": "flower",
+        "flowering": "flower",
+        "fruits": "fruit",
+        "berry": "fruit",
+        "berries": "fruit",
+        "shrub": "bush",
+        "shrubs": "bush",
+        "bushes": "bush",
+        "trees": "tree",
+        "vines": "vine",
+        "grasses": "grass",
+        "succulents": "succulent",
+    }
+    return aliases.get(normalized)
+
+
+def species_text_blob(species: dict[str, Any]) -> str:
+    fields: list[str] = []
+    for key in (
+        "common_name",
+        "scientific_name",
+        "description",
+        "habit",
+        "plant_habit",
+        "growth_habit",
+        "growth_form",
+        "edible_parts",
+    ):
+        value = species.get(key)
+        if isinstance(value, str):
+            fields.append(value)
+        elif isinstance(value, list):
+            fields.extend(str(item) for item in value if item is not None)
+    return " ".join(fields).lower()
+
+
+def species_match_score(species: dict[str, Any], plant_type: str) -> int:
+    option = PLANT_TYPE_OPTIONS.get(plant_type)
+    if not option:
+        return 1
+
+    keywords: tuple[str, ...] = option.get("keywords", ())
+    flora_habit = option.get("flora_habit")
+    habit_text = str(
+        species.get("habit")
+        or species.get("plant_habit")
+        or species.get("growth_habit")
+        or species.get("growth_form")
+        or ""
+    ).lower()
+    text_blob = species_text_blob(species)
+
+    score = 0
+    if isinstance(flora_habit, str) and flora_habit and flora_habit in habit_text:
+        score += 5
+    if any(keyword in habit_text for keyword in keywords):
+        score += 4
+    if any(keyword in text_blob for keyword in keywords):
+        score += 2
+
+    # Additional weaker signals by category.
+    if plant_type == "flower":
+        if species.get("flower_color") or species.get("flowerColor") or species.get("bloom_time"):
+            score += 1
+    if plant_type == "fruit":
+        edible_parts = species.get("edible_parts")
+        if isinstance(edible_parts, list) and any("fruit" in str(part).lower() for part in edible_parts):
+            score += 3
+
+    return score
+
+
+def prioritize_species_by_plant_type(
+    species_entries: list[dict[str, Any]], plant_type: str | None
+) -> tuple[list[dict[str, Any]], int, bool]:
+    if not plant_type:
+        return species_entries, len(species_entries), False
+
+    scored = [
+        (species, species_match_score(species, plant_type), index)
+        for index, species in enumerate(species_entries)
+    ]
+    strong_matches = [item for item in scored if item[1] > 0]
+    if strong_matches:
+        strong_matches.sort(key=lambda item: (-item[1], item[2]))
+        return [item[0] for item in strong_matches], len(strong_matches), False
+
+    # Relax filter when no strong metadata matches are available.
+    scored.sort(key=lambda item: (-item[1], item[2]))
+    return [item[0] for item in scored], 0, True
 
 
 def region_from_state(state_code: str | None) -> str:
@@ -436,24 +575,31 @@ def register_runtime_plants(plants: list[dict[str, Any]]) -> None:
             PLANT_LIBRARY.append(plant)
 
 
-def flora_recommendations_for_zip(zip_code: str) -> tuple[dict[str, str], list[dict[str, Any]], str]:
+def flora_recommendations_for_zip(
+    zip_code: str, plant_type: str | None = None
+) -> tuple[dict[str, str], list[dict[str, Any]], str, dict[str, Any]]:
     climate_payload = flora_get(f"/v1/climate/zipcode/{zip_code}")
     state_code = extract_state_code(climate_payload) or "CA"
     region = region_from_state(state_code)
     zone_hint = extract_zone_hint(climate_payload) or fallback_zone_for_region(region)
+    normalized_plant_type = normalize_plant_type(plant_type)
 
     search_payload = flora_get(
         "/v1/search",
-        params={"state": state_code, "native_only": True, "limit": 24},
+        params={"state": state_code, "native_only": True, "limit": 80},
     )
     species_entries = extract_species_list(search_payload)
     if not species_entries:
         region_payload = flora_get(f"/v1/regions/{state_code}/native", params={"limit": 24})
         species_entries = extract_species_list(region_payload)
 
+    ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
+        species_entries, normalized_plant_type
+    )
+
     flora_plants: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for position, species in enumerate(species_entries):
+    for position, species in enumerate(ranked_species):
         mapped_plant = flora_species_to_plant(species, state_code=state_code, zone_hint=zone_hint, position=position)
         plant_id = mapped_plant["id"]
         if plant_id in seen_ids:
@@ -469,7 +615,12 @@ def flora_recommendations_for_zip(zip_code: str) -> tuple[dict[str, str], list[d
         "zone": zone_hint,
         "region": region,
     }
-    return climate_profile, flora_plants, state_code
+    filter_metadata = {
+        "plantType": normalized_plant_type,
+        "strictMatchCount": strict_match_count,
+        "filterRelaxed": filter_relaxed,
+    }
+    return climate_profile, flora_plants, state_code, filter_metadata
 
 
 def get_climate_profile(climate_id: str | None) -> dict[str, str]:
@@ -601,11 +752,16 @@ def health_check() -> Any:
 
 @app.get("/api/config")
 def config() -> Any:
+    plant_type_options = [
+        {"id": option_id, "label": option_details["label"]}
+        for option_id, option_details in PLANT_TYPE_OPTIONS.items()
+    ]
     return jsonify(
         {
             "climateOptions": CLIMATE_OPTIONS,
             "plantLibrary": PLANT_LIBRARY,
             "constraints": {"minGardenDimension": 6, "maxGardenDimension": 24},
+            "plantTypeOptions": plant_type_options,
             "integrations": {
                 "flora": {
                     "enabled": flora_enabled(),
@@ -620,6 +776,18 @@ def config() -> Any:
 def recommendations() -> Any:
     climate_id = request.args.get("climateId") or request.args.get("climate_id")
     zip_code = normalize_zip_code(request.args.get("zipCode") or request.args.get("zip_code"))
+    requested_plant_type = request.args.get("plantType") or request.args.get("plant_type")
+    normalized_plant_type = normalize_plant_type(requested_plant_type)
+    if requested_plant_type and not normalized_plant_type:
+        return (
+            jsonify(
+                {
+                    "error": "Unsupported plantType. Use one of: flower, fruit, bush, tree, vine, grass, succulent.",
+                    "plantType": requested_plant_type,
+                }
+            ),
+            400,
+        )
     if zip_code:
         if not flora_enabled():
             return (
@@ -631,9 +799,11 @@ def recommendations() -> Any:
                     }
                 ),
                 503,
-            )
+        )
         try:
-            climate_profile, flora_plants, state_code = flora_recommendations_for_zip(zip_code)
+            climate_profile, flora_plants, state_code, filter_metadata = flora_recommendations_for_zip(
+                zip_code, plant_type=normalized_plant_type
+            )
         except requests.RequestException as exc:
             return (
                 jsonify(
@@ -657,18 +827,40 @@ def recommendations() -> Any:
                 "state": state_code,
                 "floraEnabled": True,
                 "source": "flora",
+                "plantType": normalized_plant_type,
+                "filterRelaxed": filter_metadata["filterRelaxed"],
+                "strictMatchCount": filter_metadata["strictMatchCount"],
             }
         )
 
     climate_profile = get_climate_profile(climate_id)
-    return jsonify({"climate": climate_profile, "plants": recommend_plants(climate_profile), "source": "local"})
+    return jsonify(
+        {
+            "climate": climate_profile,
+            "plants": recommend_plants(climate_profile),
+            "source": "local",
+            "plantType": normalized_plant_type,
+        }
+    )
 
 
 @app.get("/api/recommendations/zipcode")
 def recommendations_by_zip_code() -> Any:
     zip_code = normalize_zip_code(request.args.get("zipCode") or request.args.get("zip_code"))
+    requested_plant_type = request.args.get("plantType") or request.args.get("plant_type")
+    normalized_plant_type = normalize_plant_type(requested_plant_type)
     if not zip_code:
         return jsonify({"error": "A valid 5-digit zipCode is required."}), 400
+    if requested_plant_type and not normalized_plant_type:
+        return (
+            jsonify(
+                {
+                    "error": "Unsupported plantType. Use one of: flower, fruit, bush, tree, vine, grass, succulent.",
+                    "plantType": requested_plant_type,
+                }
+            ),
+            400,
+        )
 
     if not flora_enabled():
         return (
@@ -683,7 +875,9 @@ def recommendations_by_zip_code() -> Any:
         )
 
     try:
-        climate_profile, flora_plants, state_code = flora_recommendations_for_zip(zip_code)
+        climate_profile, flora_plants, state_code, filter_metadata = flora_recommendations_for_zip(
+            zip_code, plant_type=normalized_plant_type
+        )
     except requests.RequestException as exc:
         return (
             jsonify(
@@ -707,6 +901,9 @@ def recommendations_by_zip_code() -> Any:
             "state": state_code,
             "floraEnabled": True,
             "source": "flora",
+            "plantType": normalized_plant_type,
+            "filterRelaxed": filter_metadata["filterRelaxed"],
+            "strictMatchCount": filter_metadata["strictMatchCount"],
         }
     )
 

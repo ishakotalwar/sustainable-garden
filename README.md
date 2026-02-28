@@ -37,4 +37,5 @@ EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:5001 npm run web
 - `GET /api/config`
 - `GET /api/recommendations?climateId=irvine`
 - `GET /api/recommendations/zipcode?zipCode=94102`
+- `GET /api/recommendations/zipcode?zipCode=94102&plantType=tree`
 - `POST /api/score`
