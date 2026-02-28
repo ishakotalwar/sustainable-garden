@@ -295,6 +295,98 @@ def normalize_plant_type(raw_plant_type: str | None) -> str | None:
     return aliases.get(normalized)
 
 
+def flora_type_search_candidates(state_code: str, plant_type: str | None) -> list[tuple[str, dict[str, Any]]]:
+    base_params = {"state": state_code, "native_only": True, "limit": 80}
+    if not plant_type:
+        return [("/v1/search", base_params)]
+
+    if plant_type == "fruit":
+        return [
+            ("/v1/search/edible", {**base_params, "edible_part": "fruit"}),
+            ("/v1/search", {**base_params, "q": "fruit"}),
+            ("/v1/search", {**base_params, "q": "berry"}),
+            ("/v1/search", {**base_params, "q": "orchard"}),
+        ]
+
+    type_terms = {
+        "flower": ("forb", "flower"),
+        "bush": ("shrub", "bush"),
+        "tree": ("tree", "tree"),
+        "vine": ("vine", "vine"),
+        "grass": ("grass", "grass"),
+        "succulent": ("succulent", "succulent"),
+    }
+    habit_value, query_term = type_terms.get(plant_type, (plant_type, plant_type))
+    return [
+        ("/v1/search", {**base_params, "plant_habit": habit_value}),
+        ("/v1/search", {**base_params, "habit": habit_value}),
+        ("/v1/search", {**base_params, "q": query_term}),
+    ]
+
+
+def fetch_species_entries_for_type(
+    state_code: str, plant_type: str | None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    candidates = flora_type_search_candidates(state_code, plant_type)
+    collected: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    attempted: list[dict[str, Any]] = []
+    successful_calls = 0
+    last_error: Exception | None = None
+
+    for path, params in candidates:
+        try:
+            payload = flora_get(path, params=params)
+            species_entries = extract_species_list(payload)
+            successful_calls += 1
+            attempted.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "resultCount": len(species_entries),
+                }
+            )
+            for species in species_entries:
+                signature = str(
+                    species.get("id")
+                    or species.get("species_id")
+                    or species.get("identifier")
+                    or species.get("usda_symbol")
+                    or species.get("scientific_name")
+                    or species.get("common_name")
+                    or ""
+                ).strip()
+                if not signature:
+                    continue
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                collected.append(species)
+                if len(collected) >= 150:
+                    break
+        except requests.RequestException as exc:
+            last_error = exc
+            attempted.append(
+                {
+                    "path": path,
+                    "params": params,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+    if not collected and last_error is not None and successful_calls == 0:
+        raise last_error
+
+    metadata = {
+        "strategy": "typed" if plant_type else "default",
+        "attemptedQueries": attempted,
+        "successfulCalls": successful_calls,
+        "combinedSpeciesCount": len(collected),
+    }
+    return collected, metadata
+
+
 def species_text_blob(species: dict[str, Any]) -> str:
     fields: list[str] = []
     for key in (
@@ -315,6 +407,44 @@ def species_text_blob(species: dict[str, Any]) -> str:
     return " ".join(fields).lower()
 
 
+def species_habit_text(species: dict[str, Any]) -> str:
+    return str(
+        species.get("habit")
+        or species.get("plant_habit")
+        or species.get("growth_habit")
+        or species.get("growth_form")
+        or ""
+    ).lower()
+
+
+def species_strict_match(species: dict[str, Any], plant_type: str) -> bool:
+    option = PLANT_TYPE_OPTIONS.get(plant_type)
+    if not option:
+        return True
+
+    keywords: tuple[str, ...] = option.get("keywords", ())
+    flora_habit = option.get("flora_habit")
+    habit_text = species_habit_text(species)
+    text_blob = species_text_blob(species)
+
+    if plant_type == "fruit":
+        edible_parts = species.get("edible_parts")
+        if isinstance(edible_parts, list) and any(
+            any(token in str(part).lower() for token in ("fruit", "berry", "nut"))
+            for part in edible_parts
+        ):
+            return True
+        return any(keyword in text_blob for keyword in keywords)
+
+    if plant_type == "flower":
+        if species.get("flower_color") or species.get("flowerColor") or species.get("bloom_time"):
+            return True
+
+    if isinstance(flora_habit, str) and flora_habit and flora_habit in habit_text:
+        return True
+    return any(keyword in habit_text for keyword in keywords)
+
+
 def species_match_score(species: dict[str, Any], plant_type: str) -> int:
     option = PLANT_TYPE_OPTIONS.get(plant_type)
     if not option:
@@ -322,16 +452,12 @@ def species_match_score(species: dict[str, Any], plant_type: str) -> int:
 
     keywords: tuple[str, ...] = option.get("keywords", ())
     flora_habit = option.get("flora_habit")
-    habit_text = str(
-        species.get("habit")
-        or species.get("plant_habit")
-        or species.get("growth_habit")
-        or species.get("growth_form")
-        or ""
-    ).lower()
+    habit_text = species_habit_text(species)
     text_blob = species_text_blob(species)
 
     score = 0
+    if species_strict_match(species, plant_type):
+        score += 6
     if isinstance(flora_habit, str) and flora_habit and flora_habit in habit_text:
         score += 5
     if any(keyword in habit_text for keyword in keywords):
@@ -361,14 +487,19 @@ def prioritize_species_by_plant_type(
         (species, species_match_score(species, plant_type), index)
         for index, species in enumerate(species_entries)
     ]
-    strong_matches = [item for item in scored if item[1] > 0]
+    strong_matches = [item for item in scored if species_strict_match(item[0], plant_type)]
     if strong_matches:
         strong_matches.sort(key=lambda item: (-item[1], item[2]))
         return [item[0] for item in strong_matches], len(strong_matches), False
 
-    # Relax filter when no strong metadata matches are available.
-    scored.sort(key=lambda item: (-item[1], item[2]))
-    return [item[0] for item in scored], 0, True
+    weak_matches = [item for item in scored if item[1] > 0]
+    if weak_matches:
+        weak_matches.sort(key=lambda item: (-item[1], item[2]))
+        return [item[0] for item in weak_matches], 0, True
+
+    # If we cannot infer type at all from metadata/text, return no results instead of
+    # silently returning unrelated plants.
+    return [], 0, True
 
 
 def region_from_state(state_code: str | None) -> str:
@@ -584,14 +715,17 @@ def flora_recommendations_for_zip(
     zone_hint = extract_zone_hint(climate_payload) or fallback_zone_for_region(region)
     normalized_plant_type = normalize_plant_type(plant_type)
 
-    search_payload = flora_get(
-        "/v1/search",
-        params={"state": state_code, "native_only": True, "limit": 80},
-    )
-    species_entries = extract_species_list(search_payload)
+    species_entries, query_metadata = fetch_species_entries_for_type(state_code, normalized_plant_type)
     if not species_entries:
-        region_payload = flora_get(f"/v1/regions/{state_code}/native", params={"limit": 24})
-        species_entries = extract_species_list(region_payload)
+        try:
+            region_payload = flora_get(f"/v1/regions/{state_code}/native", params={"limit": 40})
+            species_entries = extract_species_list(region_payload)
+            query_metadata["fallback"] = "regions_native"
+            query_metadata["fallbackCount"] = len(species_entries)
+        except requests.RequestException as exc:
+            query_metadata["fallback"] = "regions_native_failed"
+            query_metadata["fallbackError"] = str(exc)
+            species_entries = []
 
     ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
         species_entries, normalized_plant_type
@@ -619,6 +753,7 @@ def flora_recommendations_for_zip(
         "plantType": normalized_plant_type,
         "strictMatchCount": strict_match_count,
         "filterRelaxed": filter_relaxed,
+        "queryMetadata": query_metadata,
     }
     return climate_profile, flora_plants, state_code, filter_metadata
 
@@ -830,6 +965,7 @@ def recommendations() -> Any:
                 "plantType": normalized_plant_type,
                 "filterRelaxed": filter_metadata["filterRelaxed"],
                 "strictMatchCount": filter_metadata["strictMatchCount"],
+                "queryMetadata": filter_metadata.get("queryMetadata"),
             }
         )
 
@@ -904,6 +1040,7 @@ def recommendations_by_zip_code() -> Any:
             "plantType": normalized_plant_type,
             "filterRelaxed": filter_metadata["filterRelaxed"],
             "strictMatchCount": filter_metadata["strictMatchCount"],
+            "queryMetadata": filter_metadata.get("queryMetadata"),
         }
     )
 
