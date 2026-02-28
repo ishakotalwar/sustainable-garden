@@ -246,6 +246,7 @@ export default function HomeScreen() {
   const [canvasImageMessage, setCanvasImageMessage] = useState<string | null>(null);
   const [canvasImageHasError, setCanvasImageHasError] = useState(false);
   const uploadedObjectUrlRef = useRef<string | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
   const [plantLibrary, setPlantLibrary] = useState<Plant[]>(DEFAULT_PLANT_LIBRARY);
   const [recommendations, setRecommendations] = useState<Plant[]>([]);
@@ -457,7 +458,7 @@ export default function HomeScreen() {
   const statusDotColor = backendStatus === 'connected' ? '#86c966' : backendStatus === 'checking' ? '#e8c96a' : '#e07a5f';
 
   return (
-    <ScrollView style={styles.page} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
+    <ScrollView ref={scrollRef} style={styles.page} contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
 
       {/* HERO — full screen height */}
       <View style={styles.hero}>
@@ -472,10 +473,10 @@ export default function HomeScreen() {
           <Text style={styles.heroEyebrow}>🌿 EcoScape</Text>
           <Text style={styles.heroTitle}>Design Your{'\n'}Dream Garden</Text>
           <Text style={styles.heroSub} >
-            Build a sustainable garden,{'\n'} and see your eco impact!
+            Build a sustainable garden and see your eco impact!
           </Text>
         </View>
-        <View style={styles.heroBar}>
+        {/* <View style={styles.heroBar}>
           <View style={styles.heroBarItem}>
             <Text style={styles.heroBarNum}>{placedPlants.length}</Text>
             <Text style={styles.heroBarLabel}>Plants placed</Text>
@@ -492,10 +493,13 @@ export default function HomeScreen() {
             </Text>
             <Text style={styles.heroBarLabel}>Eco score</Text>
           </View>
-        </View>
-        <View style={styles.heroScrollCue}>
+        </View> */}
+        {/* <View style={styles.heroScrollCue}>
           <Text style={styles.heroScrollCueText}>scroll to start  ↓</Text>
-        </View>
+        </View> */}
+        <Pressable style={styles.getStartedBtn} onPress={() => scrollRef.current?.scrollTo({ y: SCREEN_HEIGHT, animated: true })}>
+          <Text style={styles.getStartedText}>Get Started ↓</Text>
+        </Pressable>
       </View>
 
       {/* 1. GARDEN SETUP */}
@@ -742,8 +746,18 @@ const styles = StyleSheet.create({
   heroBarNum: { color: '#f5ede0', fontSize: 20, fontWeight: '900' },
   heroBarLabel: { color: '#9ab88a', fontSize: 11, fontWeight: '600', marginTop: 3 },
   heroBarDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.15)' },
-  heroScrollCue: { alignItems: 'center', paddingBottom: 16 },
-  heroScrollCueText: { color: 'rgba(200,220,190,0.7)', fontSize: 12, letterSpacing: 0.5 },
+  // heroScrollCue: { alignItems: 'center', paddingBottom: 16 },
+  // heroScrollCueText: { color: 'rgba(200,220,190,0.7)', fontSize: 12, letterSpacing: 0.5 },
+ getStartedBtn: {
+  marginBottom: 100,
+  backgroundColor: 'rgba(255,255,255,0.15)',
+  borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)',
+  borderRadius: 999, paddingVertical: 14, paddingHorizontal: 40,
+  alignSelf: 'center',
+},
+getStartedText: {
+  color: '#f5ede0', fontSize: 15, fontWeight: '700', letterSpacing: 0.5,
+},
 
   sectionCard: { backgroundColor: WARM_WHITE, borderRadius: 22, marginHorizontal: 14, padding: 18, gap: 12, shadowColor: '#8a7060', shadowOpacity: 0.09, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 2 },
   sectionTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
