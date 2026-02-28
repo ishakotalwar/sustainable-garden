@@ -1,5 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  Image,
+  PanResponder,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 type Rating = 'Low' | 'Medium' | 'High';
 type Region = 'CA' | 'Southwest' | 'PacificNW' | 'Southeast';
@@ -416,6 +426,11 @@ export default function HomeScreen() {
   const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
   const [placedPlants, setPlacedPlants] = useState<PlacedPlant[]>([]);
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
+  const [canvasImageInput, setCanvasImageInput] = useState('');
+  const [canvasImageUri, setCanvasImageUri] = useState<string | null>(null);
+  const [canvasImageMessage, setCanvasImageMessage] = useState<string | null>(null);
+  const [canvasImageHasError, setCanvasImageHasError] = useState(false);
+  const uploadedObjectUrlRef = useRef<string | null>(null);
   const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
   const [plantLibrary, setPlantLibrary] = useState<Plant[]>(DEFAULT_PLANT_LIBRARY);
   const [recommendations, setRecommendations] = useState<Plant[]>(
@@ -613,6 +628,17 @@ export default function HomeScreen() {
     });
   }, [canvasHeight, canvasWidth]);
 
+  useEffect(() => {
+    return () => {
+      const objectUrl = uploadedObjectUrlRef.current;
+      const globalUrl = (globalThis as { URL?: { revokeObjectURL?: (url: string) => void } }).URL;
+      if (objectUrl && globalUrl?.revokeObjectURL) {
+        globalUrl.revokeObjectURL(objectUrl);
+      }
+      uploadedObjectUrlRef.current = null;
+    };
+  }, []);
+
   function addPlantToCanvas(plant: Plant) {
     const size = 56;
     const instanceId = `${plant.id}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -689,6 +715,89 @@ export default function HomeScreen() {
   function clearCanvas() {
     setPlacedPlants([]);
     setSelectedPlantId(null);
+  }
+
+  function clearUploadedObjectUrl() {
+    const objectUrl = uploadedObjectUrlRef.current;
+    const globalUrl = (globalThis as { URL?: { revokeObjectURL?: (url: string) => void } }).URL;
+    if (objectUrl && globalUrl?.revokeObjectURL) {
+      globalUrl.revokeObjectURL(objectUrl);
+    }
+    uploadedObjectUrlRef.current = null;
+  }
+
+  function applyCanvasImage() {
+    const nextUri = canvasImageInput.trim();
+    if (!nextUri) {
+      setCanvasImageMessage('Enter an image URL first.');
+      setCanvasImageHasError(true);
+      return;
+    }
+
+    const isValidUri =
+      nextUri.startsWith('https://') ||
+      nextUri.startsWith('http://') ||
+      nextUri.startsWith('data:image/') ||
+      nextUri.startsWith('file://');
+
+    if (!isValidUri) {
+      setCanvasImageMessage('Use a valid URL (https://...) or data:image/... value.');
+      setCanvasImageHasError(true);
+      return;
+    }
+
+    clearUploadedObjectUrl();
+    setCanvasImageUri(nextUri);
+    setCanvasImageMessage('Loading backyard image...');
+    setCanvasImageHasError(false);
+  }
+
+  function uploadCanvasImageFromDevice() {
+    if (Platform.OS !== 'web') {
+      setCanvasImageMessage('Device upload is available on web/laptop mode.');
+      setCanvasImageHasError(true);
+      return;
+    }
+
+    const doc = (globalThis as { document?: { createElement?: (tag: string) => any } }).document;
+    const globalUrl = (globalThis as {
+      URL?: { createObjectURL?: (file: any) => string; revokeObjectURL?: (url: string) => void };
+    }).URL;
+    const createObjectURL = globalUrl?.createObjectURL;
+
+    if (!doc?.createElement || !createObjectURL) {
+      setCanvasImageMessage('Upload is not available in this environment.');
+      setCanvasImageHasError(true);
+      return;
+    }
+
+    const fileInput = doc.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.onchange = () => {
+      const selectedFile = fileInput.files?.[0] as { name?: string } | undefined;
+      if (!selectedFile) {
+        return;
+      }
+
+      const nextObjectUrl = createObjectURL(selectedFile);
+      clearUploadedObjectUrl();
+      uploadedObjectUrlRef.current = nextObjectUrl;
+      setCanvasImageInput(selectedFile.name ?? 'local-image');
+      setCanvasImageUri(nextObjectUrl);
+      setCanvasImageMessage(`Loaded local file: ${selectedFile.name ?? 'image'}`);
+      setCanvasImageHasError(false);
+    };
+
+    fileInput.click();
+  }
+
+  function removeCanvasImage() {
+    clearUploadedObjectUrl();
+    setCanvasImageUri(null);
+    setCanvasImageInput('');
+    setCanvasImageMessage(null);
+    setCanvasImageHasError(false);
   }
 
   return (
@@ -802,9 +911,59 @@ export default function HomeScreen() {
         <Text style={styles.sectionHint}>
           Drag plants to arrange them. Select one to resize or remove it from your design.
         </Text>
+        <View style={styles.canvasImageBlock}>
+          <Text style={styles.dimensionLabel}>Backyard Image URL</Text>
+          <TextInput
+            value={canvasImageInput}
+            onChangeText={setCanvasImageInput}
+            style={styles.canvasImageInput}
+            placeholder="https://example.com/backyard.jpg"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={styles.canvasImageButtonRow}>
+            <Pressable style={styles.uploadImageButton} onPress={uploadCanvasImageFromDevice}>
+              <Text style={styles.uploadImageButtonText}>Upload from Device</Text>
+            </Pressable>
+            <Pressable style={styles.applyImageButton} onPress={applyCanvasImage}>
+              <Text style={styles.applyImageButtonText}>Use Image</Text>
+            </Pressable>
+            <Pressable style={styles.removeImageButton} onPress={removeCanvasImage}>
+              <Text style={styles.removeImageButtonText}>Remove Image</Text>
+            </Pressable>
+          </View>
+          {canvasImageMessage ? (
+            <Text style={canvasImageHasError ? styles.canvasImageErrorText : styles.canvasImageInfoText}>
+              {canvasImageMessage}
+            </Text>
+          ) : (
+            <Text style={styles.sectionHint}>
+              Upload from your laptop or paste a hosted image URL to use as the canvas background.
+            </Text>
+          )}
+        </View>
 
         <View style={styles.canvasShell}>
           <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
+            {canvasImageUri ? (
+              <>
+                <Image
+                  source={{ uri: canvasImageUri }}
+                  style={styles.canvasBackgroundImage}
+                  resizeMode="cover"
+                  onLoad={() => {
+                    setCanvasImageMessage('Backyard image loaded.');
+                    setCanvasImageHasError(false);
+                  }}
+                  onError={() => {
+                    setCanvasImageMessage('Could not load image. Check the URL and try again.');
+                    setCanvasImageHasError(true);
+                  }}
+                />
+                <View pointerEvents="none" style={styles.canvasImageOverlay} />
+              </>
+            ) : null}
+
             {Array.from({ length: canvasWidthFeet + 1 }, (_, index) => (
               <View
                 key={`vertical-${index}`}
@@ -1133,6 +1292,81 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 13,
   },
+  canvasImageBlock: {
+    borderWidth: 1,
+    borderColor: '#d3e5d8',
+    borderRadius: 12,
+    backgroundColor: '#f6fcf7',
+    padding: 10,
+    gap: 8,
+  },
+  canvasImageInput: {
+    borderWidth: 1,
+    borderColor: '#b8d5c1',
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    color: '#173a2b',
+    fontSize: 14,
+  },
+  canvasImageButtonRow: {
+    flexDirection: 'row',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  uploadImageButton: {
+    flex: 1,
+    minWidth: 120,
+    borderRadius: 10,
+    backgroundColor: '#0f5a79',
+    alignItems: 'center',
+    paddingVertical: 9,
+  },
+  uploadImageButtonText: {
+    color: '#ecf8ff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  applyImageButton: {
+    flex: 1,
+    minWidth: 92,
+    borderRadius: 10,
+    backgroundColor: '#146e48',
+    alignItems: 'center',
+    paddingVertical: 9,
+  },
+  applyImageButtonText: {
+    color: '#ecfff3',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  removeImageButton: {
+    flex: 1,
+    minWidth: 92,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d0dcd4',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    paddingVertical: 9,
+  },
+  removeImageButtonText: {
+    color: '#2e5340',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  canvasImageInfoText: {
+    color: '#35694f',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  canvasImageErrorText: {
+    color: '#a53a1a',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
   canvasHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1167,6 +1401,13 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: '#f8fff8',
     overflow: 'hidden',
+  },
+  canvasBackgroundImage: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  canvasImageOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(12, 27, 18, 0.24)',
   },
   gridLineVertical: {
     position: 'absolute',
