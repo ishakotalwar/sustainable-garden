@@ -11,8 +11,40 @@ import {
   TextInput,
   View,
 } from 'react-native';
-
 const imageCache = new Map<string, string | null>();
+
+async function fetchInatImage(query: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://api.inaturalist.org/v1/taxa/autocomplete?q=${encodeURIComponent(query)}&per_page=3`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    for (const taxon of data?.results ?? []) {
+      const url = taxon?.default_photo?.medium_url ?? taxon?.default_photo?.square_url ?? null;
+      if (url) return url;
+    }
+    return null;
+  } catch { return null; }
+}
+
+async function fetchWikiImage(name: string): Promise<string | null> {
+  try {
+    const searchRes = await fetch(
+      `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(name)}&limit=2&format=json&origin=*`
+    );
+    if (!searchRes.ok) return null;
+    const [, titles] = await searchRes.json() as [string, string[]];
+    for (const title of titles ?? []) {
+      const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+      if (!res.ok) continue;
+      const d = await res.json();
+      const url = d?.originalimage?.source ?? d?.thumbnail?.source ?? null;
+      if (url) return url;
+    }
+    return null;
+  } catch { return null; }
+}
 
 function usePlantImage(plant: Plant): string | null {
   const [imageUri, setImageUri] = useState<string | null>(
@@ -26,54 +58,14 @@ function usePlantImage(plant: Plant): string | null {
     }
 
     let cancelled = false;
-
-    async function tryDirectSummary(name: string): Promise<string | null> {
-      try {
-        const res = await fetch(
-          `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
-          { headers: { 'Accept': 'application/json' } }
-        );
-        if (!res.ok) return null;
-        const data = await res.json();
-        return data?.originalimage?.source ?? data?.thumbnail?.source ?? null;
-      } catch { return null; }
-    }
-
-    async function trySearchThenSummary(query: string): Promise<string | null> {
-      try {
-        // Use Wikipedia's opensearch to find the best matching article title
-        const searchRes = await fetch(
-          `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=3&format=json&origin=*`
-        );
-        if (!searchRes.ok) return null;
-        const [, titles] = await searchRes.json() as [string, string[]];
-        if (!titles?.length) return null;
-
-        // Try each result until we get one with an image
-        for (const title of titles) {
-          const img = await tryDirectSummary(title);
-          if (img) return img;
-        }
-        return null;
-      } catch { return null; }
-    }
-
     async function fetchImage() {
-      let uri: string | null = null;
-
-      // Strategy 1: direct lookup by exact plant name
-      uri = await tryDirectSummary(plant.name);
+      // iNaturalist first — best plant photo coverage by far
+      let uri = await fetchInatImage(plant.name);
       if (cancelled) return;
 
-      // Strategy 2: search Wikipedia with plant name
+      // Wikipedia as fallback
       if (!uri) {
-        uri = await trySearchThenSummary(plant.name);
-        if (cancelled) return;
-      }
-
-      // Strategy 3: append "plant" to disambiguate (e.g. "Sage plant")
-      if (!uri) {
-        uri = await trySearchThenSummary(`${plant.name} plant`);
+        uri = await fetchWikiImage(plant.name);
         if (cancelled) return;
       }
 
@@ -87,6 +79,81 @@ function usePlantImage(plant: Plant): string | null {
 
   return imageUri;
 }
+// const imageCache = new Map<string, string | null>();
+
+// function usePlantImage(plant: Plant): string | null {
+//   const [imageUri, setImageUri] = useState<string | null>(
+//     imageCache.has(plant.name) ? imageCache.get(plant.name) ?? null : null
+//   );
+
+//   useEffect(() => {
+//     if (imageCache.has(plant.name)) {
+//       setImageUri(imageCache.get(plant.name) ?? null);
+//       return;
+//     }
+
+//     let cancelled = false;
+
+//     async function tryDirectSummary(name: string): Promise<string | null> {
+//       try {
+//         const res = await fetch(
+//           `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
+//           { headers: { 'Accept': 'application/json' } }
+//         );
+//         if (!res.ok) return null;
+//         const data = await res.json();
+//         return data?.originalimage?.source ?? data?.thumbnail?.source ?? null;
+//       } catch { return null; }
+//     }
+
+//     async function trySearchThenSummary(query: string): Promise<string | null> {
+//       try {
+//         // Use Wikipedia's opensearch to find the best matching article title
+//         const searchRes = await fetch(
+//           `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=3&format=json&origin=*`
+//         );
+//         if (!searchRes.ok) return null;
+//         const [, titles] = await searchRes.json() as [string, string[]];
+//         if (!titles?.length) return null;
+
+//         // Try each result until we get one with an image
+//         for (const title of titles) {
+//           const img = await tryDirectSummary(title);
+//           if (img) return img;
+//         }
+//         return null;
+//       } catch { return null; }
+//     }
+
+//     async function fetchImage() {
+//       let uri: string | null = null;
+
+//       // Strategy 1: direct lookup by exact plant name
+//       uri = await tryDirectSummary(plant.name);
+//       if (cancelled) return;
+
+//       // Strategy 2: search Wikipedia with plant name
+//       if (!uri) {
+//         uri = await trySearchThenSummary(plant.name);
+//         if (cancelled) return;
+//       }
+
+//       // Strategy 3: append "plant" to disambiguate (e.g. "Sage plant")
+//       if (!uri) {
+//         uri = await trySearchThenSummary(`${plant.name} plant`);
+//         if (cancelled) return;
+//       }
+
+//       imageCache.set(plant.name, uri);
+//       setImageUri(uri);
+//     }
+
+//     fetchImage();
+//     return () => { cancelled = true; };
+//   }, [plant.name]);
+
+//   return imageUri;
+// }
 type Rating = 'Low' | 'Medium' | 'High';
 type Region = string;
 
@@ -408,52 +475,75 @@ function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMo
     : undefined;
 
     return (
-      <View
-        ref={viewRef}
-        {...panResponder.panHandlers}
-        style={[
-          styles.placedPlant,
-          selected && styles.placedPlantSelected,
-          { left: item.x, top: item.y, width: item.size, height: item.size },
-          webStyle,
-        ]}
-      >
-        {imageUri ? (
-          // Real plant photo from Wikipedia
-          <Image
-            source={{ uri: imageUri }}
-            style={{
-              width: '100%',
-              height: '100%',
-              borderRadius: 999,
-            }}
-            resizeMode="cover"
-          />
-        ) : (
-          // Emoji fallback while loading or if not found
-          <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
-        )}
+  <View
+    ref={viewRef}
+    {...panResponder.panHandlers}
+    style={[
+      styles.placedPlant,
+      selected && styles.placedPlantSelected,
+      { left: item.x, top: item.y, width: item.size, height: item.size },
+      webStyle,
+    ]}
+  >
+    {imageUri ? (
+      <Image
+        source={{ uri: imageUri }}
+        style={{ width: '100%', height: '100%', borderRadius: 16 }}
+        resizeMode="cover"
+      />
+    ) : (
+      <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
+    )}
+  </View>
+);
+
+  //   return (
+  //     <View
+  //       ref={viewRef}
+  //       {...panResponder.panHandlers}
+  //       style={[
+  //         styles.placedPlant,
+  //         selected && styles.placedPlantSelected,
+  //         { left: item.x, top: item.y, width: item.size, height: item.size },
+  //         webStyle,
+  //       ]}
+  //     >
+  //       {imageUri ? (
+  //         // Real plant photo from Wikipedia
+  //         <Image
+  //           source={{ uri: imageUri }}
+  //           style={{
+  //             width: '100%',
+  //             height: '100%',
+  //             borderRadius: 999,
+  //           }}
+  //           resizeMode="cover"
+  //         />
+  //       ) : (
+  //         // Emoji fallback while loading or if not found
+  //         <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
+  //       )}
         
-        {/* Small emoji badge so you still know what plant it is */}
-        {imageUri && (
-          <View style={{
-            position: 'absolute',
-            bottom: -2,
-            right: -2,
-            backgroundColor: 'rgba(255,255,255,0.9)',
-            borderRadius: 999,
-            width: item.size * 0.35,
-            height: item.size * 0.35,
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderWidth: 1,
-            borderColor: 'rgba(0,0,0,0.1)',
-          }}>
-            <Text style={{ fontSize: item.size * 0.2 }}>{plant.emoji}</Text>
-          </View>
-        )}
-      </View>
-  );
+  //       {/* Small emoji badge so you still know what plant it is */}
+  //       {imageUri && (
+  //         <View style={{
+  //           position: 'absolute',
+  //           bottom: -2,
+  //           right: -2,
+  //           backgroundColor: 'rgba(255,255,255,0.9)',
+  //           borderRadius: 999,
+  //           width: item.size * 0.35,
+  //           height: item.size * 0.35,
+  //           alignItems: 'center',
+  //           justifyContent: 'center',
+  //           borderWidth: 1,
+  //           borderColor: 'rgba(0,0,0,0.1)',
+  //         }}>
+  //           <Text style={{ fontSize: item.size * 0.2 }}>{plant.emoji}</Text>
+  //         </View>
+  //       )}
+  //     </View>
+  // );
 }
 export default function HomeScreen() {
   const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
@@ -1129,8 +1219,28 @@ canvasPlantChip: {
 },
 canvasPlantChipEmoji: { fontSize: 22 },
 canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAlign: 'center', maxWidth: 60 },
-  placedPlant: { position: 'absolute', borderRadius: 999, borderWidth: 2, borderColor: '#7a6848', backgroundColor: 'rgba(170,210,140,0.45)', alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  placedPlantSelected: { borderColor: ACCENT_GREEN, backgroundColor: 'rgba(140,200,110,0.6)', borderWidth: 2.5 },
+  placedPlant: {
+    position: 'absolute',
+    borderRadius: 16,           // was 999 (circle) → now rounded square
+    borderWidth: 2.5,
+    borderColor: 'rgba(255,255,255,0.7)',  // white border pops on garden photo
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+    overflow: 'hidden',         // clips image to rounded corners cleanly
+    zIndex: 2,
+  },
+  placedPlantSelected: {
+    borderColor: ACCENT_GREEN,
+    borderWidth: 3,
+    shadowOpacity: 0.45,
+    shadowRadius: 10,
+  },
+
+  // placedPlant: { position: 'absolute', borderRadius: 999, borderWidth: 2, borderColor: '#7a6848', backgroundColor: 'rgba(170,210,140,0.45)', alignItems: 'center', justifyContent: 'center', zIndex: 2 },
+  // placedPlantSelected: { borderColor: ACCENT_GREEN, backgroundColor: 'rgba(140,200,110,0.6)', borderWidth: 2.5 },
 
   selPanel: { borderRadius: 12, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', padding: 12, gap: 8 },
   selTitle: { fontSize: 14, fontWeight: '800', color: BROWN },
