@@ -392,6 +392,8 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (backendStatus !== 'connected') { setApiMetrics(null); return; }
+    // Show immediate local recalculation while server scoring refreshes in background.
+    setApiMetrics(null);
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
@@ -876,7 +878,6 @@ export default function HomeScreen() {
               </View>
             ))}
             <Text style={styles.dashboardFooter}>
-              {backendStatus === 'connected' ? '🟢' : backendStatus === 'checking' ? '🟡' : '🔴'} {backendMessage}
             </Text>
           </View>
         </View>
