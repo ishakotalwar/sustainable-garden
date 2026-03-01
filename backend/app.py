@@ -73,6 +73,7 @@ FLORA_DEBUG_LOG_RECOMMENDATIONS = os.getenv("FLORA_DEBUG_LOG_RECOMMENDATIONS", "
 FLORA_PAGE_LIMIT = env_int("FLORA_PAGE_LIMIT", 80)
 FLORA_MAX_PAGES = env_int("FLORA_MAX_PAGES", 40)
 FLORA_MAX_REQUESTS_PER_QUERY = env_int("FLORA_MAX_REQUESTS_PER_QUERY", 12)
+FLORA_DEFAULT_BUCKET_QUERIES = min(26, env_int("FLORA_DEFAULT_BUCKET_QUERIES", 12))
 MAX_SPECIES_BUFFER = env_int("FLORA_MAX_SPECIES_BUFFER", 5000)
 LLM_CANDIDATE_LIMIT = env_int("LLM_CANDIDATE_LIMIT", 120)
 CURATED_RESULT_LIMIT = 10
@@ -237,16 +238,45 @@ def species_signature(species: dict[str, Any]) -> str:
     return str(raw_identifier).strip().lower().replace(" ", "-")
 
 
+def best_common_name(species: dict[str, Any]) -> str:
+    candidate_fields = (
+        "common_name",
+        "commonName",
+        "preferred_common_name",
+        "preferredCommonName",
+        "vernacular_name",
+        "vernacularName",
+    )
+    for field in candidate_fields:
+        value = species.get(field)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+
+    list_fields = (
+        "common_names",
+        "commonNames",
+        "vernacular_names",
+        "vernacularNames",
+    )
+    for field in list_fields:
+        value = species.get(field)
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, str):
+                    continue
+                cleaned = item.strip()
+                if cleaned:
+                    return cleaned
+    return ""
+
+
 def species_display_name(species: dict[str, Any]) -> str:
-    common_name = str(species.get("common_name") or "").strip()
-    scientific_name = str(species.get("scientific_name") or "").strip()
-    if common_name and scientific_name and common_name.lower() != scientific_name.lower():
-        return f"{common_name} ({scientific_name})"
+    common_name = best_common_name(species)
     if common_name:
         return common_name
-    if scientific_name:
-        return scientific_name
-    return species_signature(species) or "Unknown Species"
+    return "Unknown Plant"
 
 
 def debug_print_flora_recommendations(
@@ -373,9 +403,36 @@ def extract_total_count(payload: Any) -> int | None:
     return None
 
 
+def alphabet_bucket_letters(seed_text: str, count: int) -> list[str]:
+    if count <= 0:
+        return []
+
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    count = min(len(alphabet), count)
+    if not seed_text:
+        seed_text = "default"
+
+    # Use a coprime step so we walk the alphabet without repeats and spread buckets.
+    start = sum((index + 1) * ord(char) for index, char in enumerate(seed_text)) % len(alphabet)
+    step = 11
+    letters: list[str] = []
+    used: set[str] = set()
+
+    for idx in range(len(alphabet)):
+        letter = alphabet[(start + idx * step) % len(alphabet)]
+        if letter in used:
+            continue
+        letters.append(letter)
+        used.add(letter)
+        if len(letters) >= count:
+            break
+    return letters
+
+
 def fetch_species_entries_paginated(
     path: str,
     params: dict[str, Any],
+    max_requests: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     base_params = dict(params)
     raw_limit = base_params.get("limit")
@@ -385,6 +442,9 @@ def fetch_species_entries_paginated(
         requested_limit = FLORA_PAGE_LIMIT
     per_page_limit = max(1, min(requested_limit, FLORA_PAGE_LIMIT))
     base_params["limit"] = per_page_limit
+    request_limit = FLORA_MAX_REQUESTS_PER_QUERY
+    if isinstance(max_requests, int):
+        request_limit = max(1, min(max_requests, FLORA_MAX_REQUESTS_PER_QUERY))
 
     combined: list[dict[str, Any]] = []
     seen_signatures: set[str] = set()
@@ -396,7 +456,7 @@ def fetch_species_entries_paginated(
     stop_reason = ""
 
     def request_budget_exhausted() -> bool:
-        return requests_made >= FLORA_MAX_REQUESTS_PER_QUERY
+        return requests_made >= request_limit
 
     def add_entries(species_entries: list[dict[str, Any]]) -> int:
         added = 0
@@ -417,7 +477,7 @@ def fetch_species_entries_paginated(
     pages_fetched = 1
     add_entries(first_entries)
     total_count = extract_total_count(first_payload)
-    remaining_request_budget = max(0, min(FLORA_MAX_PAGES - 1, FLORA_MAX_REQUESTS_PER_QUERY - 1))
+    remaining_request_budget = max(0, min(FLORA_MAX_PAGES - 1, request_limit - 1))
 
     if len(combined) < MAX_SPECIES_BUFFER and first_entries and remaining_request_budget > 0:
         pagination_mode = "page"
@@ -500,7 +560,7 @@ def fetch_species_entries_paginated(
         "paginationMode": pagination_mode,
         "pagesFetched": pages_fetched,
         "requestsMade": requests_made,
-        "maxRequestsPerQuery": FLORA_MAX_REQUESTS_PER_QUERY,
+        "maxRequestsPerQuery": request_limit,
         "perPageLimit": per_page_limit,
         "resultCount": len(combined),
         "firstPageCount": len(first_entries),
@@ -514,7 +574,7 @@ def fetch_species_entries_paginated(
 
 
 def fetch_species_entries_from_candidates(
-    candidates: list[tuple[str, dict[str, Any]]], strategy: str
+    candidates: list[tuple[str, dict[str, Any], int | None]], strategy: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     collected: list[dict[str, Any]] = []
     seen_signatures: set[str] = set()
@@ -522,14 +582,19 @@ def fetch_species_entries_from_candidates(
     successful_calls = 0
     last_error: Exception | None = None
 
-    for path, params in candidates:
+    for path, params, max_requests in candidates:
         try:
-            species_entries, pagination = fetch_species_entries_paginated(path, params=params)
+            species_entries, pagination = fetch_species_entries_paginated(
+                path,
+                params=params,
+                max_requests=max_requests,
+            )
             successful_calls += 1
             attempted.append(
                 {
                     "path": path,
                     "params": params,
+                    "maxRequests": max_requests,
                     "resultCount": len(species_entries),
                     "pagination": pagination,
                 }
@@ -552,6 +617,7 @@ def fetch_species_entries_from_candidates(
                 {
                     "path": path,
                     "params": params,
+                    "maxRequests": max_requests,
                     "error": str(exc),
                 }
             )
@@ -569,17 +635,26 @@ def fetch_species_entries_from_candidates(
     return collected, metadata
 
 
-def flora_type_search_candidates(state_code: str, plant_type: str | None) -> list[tuple[str, dict[str, Any]]]:
+def flora_type_search_candidates(
+    state_code: str, plant_type: str | None, zip_code: str
+) -> list[tuple[str, dict[str, Any], int | None]]:
     base_params = {"state": state_code, "native_only": True, "limit": FLORA_PAGE_LIMIT}
     if not plant_type:
-        return [("/v1/search", base_params)]
+        # Pull one page across multiple letter buckets to reduce A-first bias.
+        bucket_letters = alphabet_bucket_letters(zip_code, FLORA_DEFAULT_BUCKET_QUERIES)
+        offset_ceiling = max(0, (FLORA_MAX_PAGES - 1) * FLORA_PAGE_LIMIT)
+        bucket_offsets = evenly_spaced_ints(0, offset_ceiling, len(bucket_letters))
+        return [
+            ("/v1/search", {**base_params, "q": letter, "offset": bucket_offsets[index]}, 1)
+            for index, letter in enumerate(bucket_letters)
+        ]
 
     if plant_type == "fruit":
         return [
-            ("/v1/search/edible", {**base_params, "edible_part": "fruit"}),
-            ("/v1/search", {**base_params, "q": "fruit"}),
-            ("/v1/search", {**base_params, "q": "berry"}),
-            ("/v1/search", {**base_params, "q": "orchard"}),
+            ("/v1/search/edible", {**base_params, "edible_part": "fruit"}, None),
+            ("/v1/search", {**base_params, "q": "fruit"}, None),
+            ("/v1/search", {**base_params, "q": "berry"}, None),
+            ("/v1/search", {**base_params, "q": "orchard"}, None),
         ]
 
     type_terms = {
@@ -592,23 +667,23 @@ def flora_type_search_candidates(state_code: str, plant_type: str | None) -> lis
     }
     habit_value, query_term = type_terms.get(plant_type, (plant_type, plant_type))
     return [
-        ("/v1/search", {**base_params, "plant_habit": habit_value}),
-        ("/v1/search", {**base_params, "habit": habit_value}),
-        ("/v1/search", {**base_params, "q": query_term}),
+        ("/v1/search", {**base_params, "plant_habit": habit_value}, None),
+        ("/v1/search", {**base_params, "habit": habit_value}, None),
+        ("/v1/search", {**base_params, "q": query_term}, None),
     ]
 
 
 def fetch_species_entries_for_type(
-    state_code: str, plant_type: str | None
+    state_code: str, plant_type: str | None, zip_code: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    candidates = flora_type_search_candidates(state_code, plant_type)
+    candidates = flora_type_search_candidates(state_code, plant_type, zip_code)
     strategy = "typed" if plant_type else "default"
     return fetch_species_entries_from_candidates(candidates, strategy)
 
 
 def flora_query_search_candidates(
     state_code: str, plant_query: str, plant_type: str | None
-) -> list[tuple[str, dict[str, Any]]]:
+) -> list[tuple[str, dict[str, Any], int | None]]:
     base = {"q": plant_query, "limit": FLORA_PAGE_LIMIT}
     option = PLANT_TYPE_OPTIONS.get(plant_type) if plant_type else None
     flora_habit = option.get("flora_habit") if option else None
@@ -619,7 +694,7 @@ def flora_query_search_candidates(
         {**base},
     ]
 
-    candidates: list[tuple[str, dict[str, Any]]] = []
+    candidates: list[tuple[str, dict[str, Any], int | None]] = []
     seen_param_keys: set[tuple[tuple[str, str], ...]] = set()
 
     for params in staged_params:
@@ -635,7 +710,7 @@ def flora_query_search_candidates(
             if dedupe_key in seen_param_keys:
                 continue
             seen_param_keys.add(dedupe_key)
-            candidates.append(("/v1/search", variant))
+            candidates.append(("/v1/search", variant, None))
     return candidates
 
 
@@ -907,7 +982,7 @@ def species_summary_for_llm(species: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "id": species_signature(species),
-        "common_name": str(species.get("common_name") or "").strip(),
+        "common_name": best_common_name(species),
         "scientific_name": str(species.get("scientific_name") or "").strip(),
         "habit": str(
             species.get("habit")
@@ -1048,7 +1123,7 @@ def request_llm_selected_species_ids(
 def heuristic_desirability_score(species: dict[str, Any], plant_type: str | None) -> float:
     score = 0.0
 
-    common_name = str(species.get("common_name") or "").strip()
+    common_name = best_common_name(species)
     scientific_name = str(species.get("scientific_name") or "").strip()
     if common_name:
         score += 2.2
@@ -1230,9 +1305,7 @@ def flora_species_to_plant(
         or f"{state_code}-flora-{position}"
     )
     plant_id = str(plant_id_source).strip().lower().replace(" ", "-")
-    scientific_name = str(species.get("scientific_name") or "").strip()
-    common_name = str(species.get("common_name") or "").strip()
-    display_name = common_name or scientific_name or f"Plant {position + 1}"
+    display_name = best_common_name(species) or f"Plant {position + 1}"
 
     nativity_text = str(
         species.get("nativity_status")
@@ -1297,7 +1370,11 @@ def flora_recommendations_for_zip(
             state_code, normalized_plant_query, normalized_plant_type
         )
     else:
-        species_entries, query_metadata = fetch_species_entries_for_type(state_code, normalized_plant_type)
+        species_entries, query_metadata = fetch_species_entries_for_type(
+            state_code,
+            normalized_plant_type,
+            zip_code,
+        )
 
     ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
         species_entries, normalized_plant_type
