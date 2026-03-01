@@ -193,6 +193,8 @@ type Plant = {
   name: string;
   emoji: string;
   isFlower?: boolean;
+  isUserPlant?: boolean;
+  userDescription?: string;
   zones: string[];
   nativeRegions: Region[];
   waterUsage: Rating;
@@ -200,6 +202,10 @@ type Plant = {
   carbonSequestration: Rating;
   shadeCoverage: Rating;
   droughtResistance: Rating;
+  waterEfficiencyScore?: number;
+  pollinatorSupportScore?: number;
+  droughtResistanceScore?: number;
+  carbonImpactScore?: number;
 };
 
 type PlacedPlant = {
@@ -254,6 +260,15 @@ type ApiRecommendationsResponse = {
 type ApiScoreResponse = {
   climate: ClimateProfile;
   metrics: SustainabilityMetrics;
+};
+
+type ApiCreateCustomPlantResponse = {
+  plant?: Plant;
+  source?: 'user-input' | string;
+  llmEnabled?: boolean;
+  llmModel?: string | null;
+  error?: string;
+  detail?: string;
 };
 
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:5001';
@@ -334,6 +349,14 @@ function computeMetrics(
   plantsById: Record<string, Plant>,
   climate: ClimateProfile
 ): SustainabilityMetrics {
+  const score0to100 = (value: unknown, fallback: number): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) return Math.round(clamp(value, 0, 100));
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return Math.round(clamp(parsed, 0, 100));
+    }
+    return fallback;
+  };
   const resolved = placedPlants
     .map(pp => { const p = plantsById[pp.plantId]; return p ? { plant: p, weight: clamp(pp.size / 56, 0.6, 2.4) } : null; })
     .filter((e): e is { plant: Plant; weight: number } => Boolean(e));
@@ -341,10 +364,30 @@ function computeMetrics(
   const plants = resolved.map(e => e.plant);
   const weights = resolved.map(e => e.weight);
   const weightTotal = weights.reduce((s, v) => s + v, 0);
-  const waterEfficiency = Math.round(weightedAverage(plants.map(p => WATER_EFFICIENCY_POINTS[p.waterUsage]), weights));
-  const pollinatorSupport = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.pollinatorValue]), weights));
-  const droughtResistance = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.droughtResistance]), weights));
-  const carbonImpact = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.carbonSequestration]), weights));
+  const waterEfficiency = Math.round(
+    weightedAverage(
+      plants.map(p => score0to100(p.waterEfficiencyScore, WATER_EFFICIENCY_POINTS[p.waterUsage])),
+      weights
+    )
+  );
+  const pollinatorSupport = Math.round(
+    weightedAverage(
+      plants.map(p => score0to100(p.pollinatorSupportScore, RATING_POINTS[p.pollinatorValue])),
+      weights
+    )
+  );
+  const droughtResistance = Math.round(
+    weightedAverage(
+      plants.map(p => score0to100(p.droughtResistanceScore, RATING_POINTS[p.droughtResistance])),
+      weights
+    )
+  );
+  const carbonImpact = Math.round(
+    weightedAverage(
+      plants.map(p => score0to100(p.carbonImpactScore, RATING_POINTS[p.carbonSequestration])),
+      weights
+    )
+  );
   const nativeWeight = resolved
     .filter(e => e.plant.nativeRegions.includes(climate.region) || e.plant.nativeRegions.includes('native'))
     .reduce((s, e) => s + e.weight, 0);
@@ -608,6 +651,11 @@ export default function HomeScreen() {
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'offline'>('checking');
   const [backendMessage, setBackendMessage] = useState('Connecting to Flask API...');
   const [apiMetrics, setApiMetrics] = useState<SustainabilityMetrics | null>(null);
+  const [customPlantName, setCustomPlantName] = useState('');
+  const [customPlantDescription, setCustomPlantDescription] = useState('');
+  const [customPlantLoading, setCustomPlantLoading] = useState(false);
+  const [customPlantMessage, setCustomPlantMessage] = useState<string | null>(null);
+  const [customPlantError, setCustomPlantError] = useState(false);
 
   const selectedClimate = useMemo(
     () => climateOptions.find(p => p.id === selectedClimateId) ?? defaultClimate(climateOptions),
@@ -731,6 +779,19 @@ export default function HomeScreen() {
     if (!selectedPlantId) return;
     setPlacedPlants(c => c.filter(p => p.instanceId !== selectedPlantId));
     setSelectedPlantId(null);
+  }
+
+  function removePlantInstances(plantId: string) {
+    if (selectedPlantDetails?.id === plantId) {
+      setSelectedPlantId(null);
+    }
+    setPlacedPlants(curr => curr.filter(p => p.plantId !== plantId));
+  }
+
+  function deletePlantFromPanel(plantId: string) {
+    removePlantInstances(plantId);
+    setRecommendations(curr => curr.filter(p => p.id !== plantId));
+    setPlantLibrary(curr => curr.filter(p => p.id !== plantId));
   }
 
   function clearCanvas() { setPlacedPlants([]); setSelectedPlantId(null); }
@@ -884,15 +945,65 @@ export default function HomeScreen() {
       if (!res.ok || payload.error) throw new Error(payload.detail || payload.error || `ZIP lookup failed (${res.status}).`);
       if (!payload.plants?.length) throw new Error('No Flora recommendations returned for this ZIP code.');
       setPlantLibrary(curr => mergePlantLists(curr, payload.plants));
+      setRecommendations(curr => {
+        const customPlants = curr.filter(plant => plant.isUserPlant);
+        const seenCustomIds = new Set(customPlants.map(plant => plant.id));
+        const floraPlants = payload.plants.filter(plant => !seenCustomIds.has(plant.id));
+        return [...customPlants, ...floraPlants];
+      });
       setClimateOptions(curr => { const f = curr.filter(p => p.id !== payload.climate.id); return [payload.climate, ...f]; });
-      setSelectedClimateId(payload.climate.id); setRecommendations(payload.plants); setActiveZipCode(zip); setZipCodeInput(zip);
+      setSelectedClimateId(payload.climate.id); setActiveZipCode(zip); setZipCodeInput(zip);
       setZipLookupError(false);
       setZipLookupMessage(null);
       setBackendStatus('connected'); setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
     } catch (err) {
-      setRecommendations([]); setActiveZipCode(null); setZipLookupError(true);
+      setRecommendations(curr => curr.filter(plant => plant.isUserPlant)); setActiveZipCode(null); setZipLookupError(true);
       setZipLookupMessage(err instanceof Error ? err.message : 'ZIP lookup failed.');
     } finally { setZipLookupLoading(false); }
+  }
+
+  async function addCustomPlantFromInput() {
+    const name = customPlantName.trim();
+    const description = customPlantDescription.trim();
+    if (!name) {
+      setCustomPlantMessage('Enter a plant name.');
+      setCustomPlantError(true);
+      return;
+    }
+
+    setCustomPlantLoading(true);
+    setCustomPlantError(false);
+    setCustomPlantMessage('Adding plant...');
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/plants/custom`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description }),
+      });
+      const payload = await res.json() as ApiCreateCustomPlantResponse;
+      if (!res.ok || payload.error || !payload.plant) {
+        throw new Error(payload.detail || payload.error || `Could not create custom plant (${res.status}).`);
+      }
+
+      const nextPlant = payload.plant;
+      setPlantLibrary(curr => mergePlantLists(curr, [nextPlant]));
+      setRecommendations(curr => {
+        const withoutDuplicate = curr.filter(plant => plant.id !== nextPlant.id);
+        return [nextPlant, ...withoutDuplicate];
+      });
+      setCustomPlantName('');
+      setCustomPlantDescription('');
+      setCustomPlantMessage(`Added "${nextPlant.name}" to your plant panel.`);
+      setCustomPlantError(false);
+      setBackendStatus('connected');
+      setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not add custom plant.';
+      setCustomPlantMessage(message);
+      setCustomPlantError(true);
+    } finally {
+      setCustomPlantLoading(false);
+    }
   }
 
   const statusDotColor = backendStatus === 'connected' ? '#86c966' : backendStatus === 'checking' ? '#e8c96a' : '#e07a5f';
@@ -967,6 +1078,41 @@ export default function HomeScreen() {
                 ? `Top picks for ZIP ${activeZipCode}.`
                 : 'Load ZIP recommendations, then add plants to canvas.'}
             </Text>
+            <View style={styles.customPlantCard}>
+              <Text style={styles.fieldLabel}>
+                Add Your Own Plant <Text style={styles.fieldLabelMuted}></Text>
+              </Text>
+              <TextInput
+                value={customPlantName}
+                onChangeText={setCustomPlantName}
+                style={styles.customPlantInput}
+                placeholder="Plant name"
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+              <TextInput
+                value={customPlantDescription}
+                onChangeText={setCustomPlantDescription}
+                style={styles.customPlantTextarea}
+                placeholder="Optional description or notes"
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+              />
+              <Pressable
+                onPress={addCustomPlantFromInput}
+                style={[styles.customPlantAddBtn, customPlantLoading && styles.customPlantAddBtnDisabled]}
+                disabled={customPlantLoading}>
+                <Text style={styles.customPlantAddBtnText}>
+                  {customPlantLoading ? 'Scoring…' : 'Add Plant'}
+                </Text>
+              </Pressable>
+              {customPlantMessage ? (
+                <Text style={customPlantError ? styles.msgError : styles.msgInfo}>{customPlantMessage}</Text>
+              ) : (
+                <Text style={styles.hint}></Text>
+              )}
+            </View>
             {recommendations.length === 0 ? (
               <View style={styles.emptyCard}>
                 <Text style={styles.emptyEmoji}>🌾</Text>
@@ -979,6 +1125,7 @@ export default function HomeScreen() {
                 showsVerticalScrollIndicator={false}>
                 {recommendations.map(plant => {
                   const isNative = plant.nativeRegions.length > 0;
+                  const placedCount = placedPlants.filter(item => item.plantId === plant.id).length;
                   return (
                     <View key={plant.id} style={styles.sidePlantCard}>
                       <View style={[styles.nativeBadge, isNative ? styles.nativeBadgeYes : styles.nativeBadgeNo]}>
@@ -992,6 +1139,19 @@ export default function HomeScreen() {
                       <Pressable style={styles.addBtn} onPress={() => addPlantToCanvas(plant)}>
                         <Text style={styles.addBtnText}>+ Add to Canvas</Text>
                       </Pressable>
+                      <View style={styles.sideCardActionRow}>
+                        <Pressable
+                          style={[styles.sideRemoveBtn, placedCount === 0 && styles.sideRemoveBtnDisabled]}
+                          onPress={() => removePlantInstances(plant.id)}
+                          disabled={placedCount === 0}>
+                          <Text style={[styles.sideRemoveBtnText, placedCount === 0 && styles.sideRemoveBtnTextDisabled]}>
+                            Remove ({placedCount})
+                          </Text>
+                        </Pressable>
+                        <Pressable style={styles.sideDeleteBtn} onPress={() => deletePlantFromPanel(plant.id)}>
+                          <Text style={styles.sideDeleteBtnText}>Delete</Text>
+                        </Pressable>
+                      </View>
                     </View>
                   );
                 })}
@@ -1198,6 +1358,19 @@ getStartedText: {
   sidePlantScroll: { flexGrow: 0 },
   sidePlantList: { gap: 10, paddingBottom: 4 },
   sidePlantCard: { borderRadius: 14, borderWidth: 1.5, borderColor: SOFT, backgroundColor: WARM_WHITE, padding: 10, gap: 6 },
+  customPlantCard: { borderRadius: 12, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#f7f2e8', padding: 10, gap: 8, marginBottom: 8 },
+  customPlantInput: { borderWidth: 1, borderColor: SOFT, borderRadius: 10, backgroundColor: WARM_WHITE, paddingHorizontal: 10, paddingVertical: 8, color: BROWN, fontSize: 13, fontWeight: '600' },
+  customPlantTextarea: { borderWidth: 1, borderColor: SOFT, borderRadius: 10, backgroundColor: WARM_WHITE, paddingHorizontal: 10, paddingVertical: 8, color: BROWN, fontSize: 13, minHeight: 70 },
+  customPlantAddBtn: { borderRadius: 10, backgroundColor: '#2c5d49', alignItems: 'center', paddingVertical: 9 },
+  customPlantAddBtnDisabled: { backgroundColor: '#7f9b8f' },
+  customPlantAddBtnText: { color: '#e6f3ea', fontSize: 12, fontWeight: '800' },
+  sideCardActionRow: { flexDirection: 'row', gap: 6, marginTop: 2 },
+  sideRemoveBtn: { flex: 1, borderRadius: 10, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#f4efe5', alignItems: 'center', paddingVertical: 8 },
+  sideRemoveBtnDisabled: { opacity: 0.6 },
+  sideRemoveBtnText: { color: MID_BROWN, fontSize: 11, fontWeight: '700' },
+  sideRemoveBtnTextDisabled: { color: '#aa9b84' },
+  sideDeleteBtn: { borderRadius: 10, borderWidth: 1.5, borderColor: '#e5c3b4', backgroundColor: '#fff1ec', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 8 },
+  sideDeleteBtnText: { color: '#9f3412', fontSize: 11, fontWeight: '800' },
 
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },

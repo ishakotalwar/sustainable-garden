@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -101,6 +102,7 @@ PLANT_RATING_CACHE: dict[str, dict[str, str]] = {}
 PLANT_RATING_FAILED_KEYS: set[str] = set()
 SPECIES_DETAILS_CACHE: dict[str, dict[str, Any] | None] = {}
 REMOVE_BG_IMAGE_CACHE: dict[str, str | None] = {}
+CUSTOM_PLANT_RATING_CACHE: dict[str, dict[str, Any]] = {}
 
 WATER_EFFICIENCY_POINTS = {"Low": 100, "Medium": 70, "High": 35}
 RATING_POINTS = {"Low": 40, "Medium": 70, "High": 100}
@@ -1092,6 +1094,148 @@ def parse_json_object_from_text(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
+def score_0_to_100(value: Any, default: int) -> int:
+    if isinstance(value, (int, float)):
+        return int(round(clamp(float(value), 0, 100)))
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return default
+        return int(round(clamp(parsed, 0, 100)))
+    return default
+
+
+def infer_custom_is_flower(name: str, description: str) -> bool:
+    text = f"{name} {description}".lower()
+    flower_tokens = (
+        "flower",
+        "flowers",
+        "floral",
+        "blossom",
+        "rose",
+        "lily",
+        "daisy",
+        "orchid",
+        "tulip",
+        "hibiscus",
+        "peony",
+        "marigold",
+    )
+    return any(token in text for token in flower_tokens)
+
+
+def custom_emoji(name: str, is_flower: bool) -> str:
+    lowered = name.lower()
+    if is_flower:
+        return "🌸"
+    if "tree" in lowered or "oak" in lowered or "maple" in lowered or "pine" in lowered:
+        return "🌳"
+    if "vine" in lowered:
+        return "🍃"
+    if "grass" in lowered:
+        return "🌾"
+    if "cactus" in lowered or "succulent" in lowered:
+        return "🌵"
+    return "🪴"
+
+
+def llm_rate_custom_plant(name: str, description: str) -> tuple[dict[str, Any] | None, str | None]:
+    cache_key = f"{name.strip().lower()}|{description.strip().lower()}"
+    if cache_key in CUSTOM_PLANT_RATING_CACHE:
+        return CUSTOM_PLANT_RATING_CACHE[cache_key], None
+
+    if not llm_enabled():
+        return None, "No LLM key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY."
+
+    model_name = llm_model_name()
+    if not model_name:
+        return None, "No LLM model configured."
+
+    prompt_payload = {
+        "name": name.strip(),
+        "description": description.strip(),
+    }
+    request_body = {
+        "model": model_name,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You rate user-provided plants for a sustainability dashboard. Return JSON only with keys: "
+                    "waterUsage, pollinatorValue, droughtResistance, carbonSequestration, shadeCoverage, isFlower, "
+                    "waterEfficiencyScore, pollinatorSupportScore, droughtResistanceScore, carbonImpactScore. "
+                    "Rating keys must be Low/Medium/High. Score keys must be integers 0-100. "
+                    "Be conservative and choose Medium/50 when uncertain."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt_payload)},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            f"{llm_api_base_url()}/chat/completions",
+            headers=llm_headers(),
+            json=request_body,
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return None, str(exc)
+
+    payload = response.json()
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None, "LLM response did not contain choices."
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    parsed = parse_json_object_from_text(llm_message_text(content))
+    if not parsed:
+        return None, "LLM response was not parseable JSON."
+
+    water_usage = normalize_rating(parsed.get("waterUsage"), default="Medium")
+    pollinator_value = normalize_rating(parsed.get("pollinatorValue"), default="Medium")
+    drought_resistance = normalize_rating(parsed.get("droughtResistance"), default="Medium")
+    carbon_sequestration = normalize_rating(parsed.get("carbonSequestration"), default="Medium")
+    shade_coverage = normalize_rating(parsed.get("shadeCoverage"), default="Medium")
+
+    raw_is_flower = parsed.get("isFlower")
+    is_flower = (
+        raw_is_flower
+        if isinstance(raw_is_flower, bool)
+        else str(raw_is_flower).strip().lower() in ("1", "true", "yes", "y")
+    )
+    if not isinstance(raw_is_flower, (bool, str)):
+        is_flower = infer_custom_is_flower(name, description)
+
+    ratings = {
+        "waterUsage": water_usage,
+        "pollinatorValue": pollinator_value,
+        "droughtResistance": drought_resistance,
+        "carbonSequestration": carbon_sequestration,
+        "shadeCoverage": shade_coverage,
+        "isFlower": is_flower,
+        "waterEfficiencyScore": score_0_to_100(
+            parsed.get("waterEfficiencyScore"), WATER_EFFICIENCY_POINTS[water_usage]
+        ),
+        "pollinatorSupportScore": score_0_to_100(
+            parsed.get("pollinatorSupportScore"), RATING_POINTS[pollinator_value]
+        ),
+        "droughtResistanceScore": score_0_to_100(
+            parsed.get("droughtResistanceScore"), RATING_POINTS[drought_resistance]
+        ),
+        "carbonImpactScore": score_0_to_100(
+            parsed.get("carbonImpactScore"), RATING_POINTS[carbon_sequestration]
+        ),
+    }
+    CUSTOM_PLANT_RATING_CACHE[cache_key] = ratings
+    return ratings, None
+
+
 def species_detail_identifier_candidates(species: dict[str, Any]) -> list[str]:
     candidates: list[str] = []
     seen: set[str] = set()
@@ -1548,13 +1692,6 @@ def flora_species_to_plant(
     drought_value = normalize_rating(drought_source, default="Medium")
     is_flower = species_strict_match(species, "flower")
 
-    llm_ratings = llm_rate_species(species)
-    if llm_ratings:
-        water_usage = llm_ratings["waterUsage"]
-        pollinator_value = llm_ratings["pollinatorValue"]
-        drought_value = llm_ratings["droughtResistance"]
-        carbon_value = llm_ratings["carbonSequestration"]
-
     return {
         "id": plant_id,
         "name": display_name,
@@ -1705,16 +1842,48 @@ def compute_metrics(
     total_weight = sum(weights)
 
     water_efficiency = round(
-        weighted_average([WATER_EFFICIENCY_POINTS[plant["waterUsage"]] for plant in plants], weights)
+        weighted_average(
+            [
+                score_0_to_100(
+                    plant.get("waterEfficiencyScore"), WATER_EFFICIENCY_POINTS[plant["waterUsage"]]
+                )
+                for plant in plants
+            ],
+            weights,
+        )
     )
     pollinator_support = round(
-        weighted_average([RATING_POINTS[plant["pollinatorValue"]] for plant in plants], weights)
+        weighted_average(
+            [
+                score_0_to_100(
+                    plant.get("pollinatorSupportScore"), RATING_POINTS[plant["pollinatorValue"]]
+                )
+                for plant in plants
+            ],
+            weights,
+        )
     )
     drought_resistance = round(
-        weighted_average([RATING_POINTS[plant["droughtResistance"]] for plant in plants], weights)
+        weighted_average(
+            [
+                score_0_to_100(
+                    plant.get("droughtResistanceScore"), RATING_POINTS[plant["droughtResistance"]]
+                )
+                for plant in plants
+            ],
+            weights,
+        )
     )
     carbon_impact = round(
-        weighted_average([RATING_POINTS[plant["carbonSequestration"]] for plant in plants], weights)
+        weighted_average(
+            [
+                score_0_to_100(
+                    plant.get("carbonImpactScore"), RATING_POINTS[plant["carbonSequestration"]]
+                )
+                for plant in plants
+            ],
+            weights,
+        )
     )
 
     native_weight = sum(weight for plant, weight in resolved_entries if plant.get("nativeRegions"))
@@ -1800,6 +1969,67 @@ def remove_background() -> Any:
         {
             "imageDataUrl": removed_background_data_url,
             "removeBgEnabled": True,
+        }
+    )
+
+
+@app.post("/api/plants/custom")
+def create_custom_plant() -> Any:
+    payload = request.get_json(silent=True) or {}
+    raw_name = payload.get("name") or payload.get("plantName") or payload.get("plant_name")
+    raw_description = payload.get("description") or payload.get("notes") or ""
+
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return jsonify({"error": "Plant name is required."}), 400
+
+    name = " ".join(raw_name.strip().split())[:80]
+    description = str(raw_description).strip()[:400]
+
+    ratings, llm_error = llm_rate_custom_plant(name, description)
+    if not ratings:
+        status_code = 503 if not llm_enabled() else 502
+        return (
+            jsonify(
+                {
+                    "error": "Could not rate custom plant.",
+                    "detail": llm_error,
+                    "llmEnabled": llm_enabled(),
+                    "llmModel": llm_model_name() if llm_enabled() else None,
+                }
+            ),
+            status_code,
+        )
+
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "plant"
+    digest = hashlib.sha1(f"{name}|{description}".encode("utf-8")).hexdigest()[:8]
+    plant_id = f"user-{slug}-{digest}"
+
+    plant = {
+        "id": plant_id,
+        "name": name,
+        "emoji": custom_emoji(name, bool(ratings["isFlower"])),
+        "isFlower": bool(ratings["isFlower"]),
+        "isUserPlant": True,
+        "userDescription": description,
+        "zones": ["unknown"],
+        "nativeRegions": [],
+        "waterUsage": ratings["waterUsage"],
+        "pollinatorValue": ratings["pollinatorValue"],
+        "carbonSequestration": ratings["carbonSequestration"],
+        "shadeCoverage": ratings["shadeCoverage"],
+        "droughtResistance": ratings["droughtResistance"],
+        "waterEfficiencyScore": ratings["waterEfficiencyScore"],
+        "pollinatorSupportScore": ratings["pollinatorSupportScore"],
+        "droughtResistanceScore": ratings["droughtResistanceScore"],
+        "carbonImpactScore": ratings["carbonImpactScore"],
+    }
+    register_runtime_plants([plant])
+    return jsonify(
+        {
+            "plant": plant,
+            "source": "user-input",
+            "llmEnabled": llm_enabled(),
+            "llmModel": llm_model_name() if llm_enabled() else None,
         }
     )
 
