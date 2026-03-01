@@ -375,6 +375,21 @@ type DraggablePlantProps = {
   onSelect: (id: string) => void;
 };
 
+function PlantCardImage({ plant }: { plant: Plant }) {
+  const imageUri = usePlantImage(plant);
+  if (imageUri) {
+    return (
+      <Image
+        source={{ uri: imageUri }}
+        style={{ width: '100%', height: 110, borderRadius: 10, marginBottom: 4 }}
+        resizeMode="cover"
+      />
+    );
+  }
+  // Emoji fallback while loading
+  return <Text style={styles.plantEmoji}>{plant.emoji}</Text>;
+}
+
 function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMove, onSelect }: DraggablePlantProps) {
   const sizeRef = useRef(item.size);
   const canvasRef = useRef({ width: canvasWidth, height: canvasHeight });
@@ -944,7 +959,8 @@ export default function HomeScreen() {
                       <View style={[styles.nativeBadge, isNative ? styles.nativeBadgeYes : styles.nativeBadgeNo]}>
                         <Text style={styles.nativeBadgeText}>{isNative ? 'Native' : 'Adaptive'}</Text>
                       </View>
-                      <Text style={styles.plantEmoji}>{plant.emoji}</Text>
+                      {/* <Text style={styles.plantEmoji}>{plant.emoji}</Text> */}
+                      <PlantCardImage plant={plant} />
                       <Text style={styles.plantName}>{plant.name}</Text>
                       <View style={styles.plantTags}>
                       </View>
@@ -1222,7 +1238,7 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
   placedPlant: {
     position: 'absolute',
     borderRadius: 16,           // was 999 (circle) → now rounded square
-    borderWidth: 2.5,
+    borderWidth: 0,
     borderColor: 'rgba(255,255,255,0.7)',  // white border pops on garden photo
     shadowColor: '#000',
     shadowOpacity: 0.25,
@@ -1233,7 +1249,7 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
     zIndex: 2,
   },
   placedPlantSelected: {
-    borderColor: ACCENT_GREEN,
+    //borderColor: ACCENT_GREEN,
     borderWidth: 3,
     shadowOpacity: 0.45,
     shadowRadius: 10,
