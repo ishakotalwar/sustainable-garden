@@ -908,7 +908,7 @@ export default function HomeScreen() {
           resizeMode="cover"
         />
         <View style={styles.heroOverlay} />
-        <View style={[styles.heroDot, { backgroundColor: statusDotColor }]} />
+        {/* <View style={[styles.heroDot, { backgroundColor: statusDotColor }]} /> */}
         <View style={styles.heroCenter}>
           <Text style={styles.heroEyebrow}>EcoScape</Text>
           <Text style={styles.heroTitle}>Design Your{'\n'}Dream Garden</Text>
@@ -1161,7 +1161,7 @@ const styles = StyleSheet.create({
   hero: { height: SCREEN_HEIGHT, position: 'relative', overflow: 'hidden' },
   heroBgImage: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' },
   heroOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 25, 10, 0.52)' },
-  heroDot: { position: 'absolute', top: 52, right: 20, width: 9, height: 9, borderRadius: 5 },
+  // heroDot: { position: 'absolute', top: 52, right: 20, width: 9, height: 9, borderRadius: 5 },
   heroCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, paddingTop: 60 },
   heroEyebrow: { color: '#b8dfa0', fontSize: 30, fontWeight: '700', letterSpacing: 1.4, textTransform: 'uppercase', marginBottom: 16 },
   heroTitle: { color: '#f5ede0', fontSize: 70, fontWeight: '900', lineHeight: 75, textAlign: 'center', letterSpacing: -1, marginBottom: 18, fontFamily: 'Georgia'},
