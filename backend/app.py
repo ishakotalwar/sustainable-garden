@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests # type: ignore
 from flask import Flask, jsonify, request # type: ignore
@@ -91,6 +92,9 @@ PLANT_LIBRARY: list[dict[str, Any]] = []
 
 PLANTS_BY_ID: dict[str, dict[str, Any]] = {plant["id"]: plant for plant in PLANT_LIBRARY}
 DYNAMIC_CLIMATE_PROFILES: dict[str, dict[str, str]] = {}
+PLANT_RATING_CACHE: dict[str, dict[str, str]] = {}
+PLANT_RATING_FAILED_KEYS: set[str] = set()
+SPECIES_DETAILS_CACHE: dict[str, dict[str, Any] | None] = {}
 
 WATER_EFFICIENCY_POINTS = {"Low": 100, "Medium": 70, "High": 35}
 RATING_POINTS = {"Low": 40, "Medium": 70, "High": 100}
@@ -1043,6 +1047,168 @@ def parse_json_object_from_text(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
+def species_detail_identifier_candidates(species: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for key in ("identifier", "id", "species_id", "usda_symbol", "symbol"):
+        value = species.get(key)
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if not cleaned:
+            continue
+        normalized = cleaned.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(cleaned)
+    return candidates
+
+
+def fetch_species_details(species: dict[str, Any]) -> dict[str, Any] | None:
+    for identifier in species_detail_identifier_candidates(species):
+        cache_key = identifier.lower()
+        if cache_key in SPECIES_DETAILS_CACHE:
+            return SPECIES_DETAILS_CACHE[cache_key]
+
+        try:
+            payload = flora_get(f"/v1/species/{quote(identifier, safe='')}")
+        except requests.RequestException:
+            SPECIES_DETAILS_CACHE[cache_key] = None
+            continue
+
+        if isinstance(payload, dict):
+            SPECIES_DETAILS_CACHE[cache_key] = payload
+            return payload
+
+        SPECIES_DETAILS_CACHE[cache_key] = None
+    return None
+
+
+def species_description_text(species: dict[str, Any]) -> str:
+    for key in ("description", "summary", "ecology", "ecology_notes", "notes"):
+        value = species.get(key)
+        if isinstance(value, str):
+            cleaned = " ".join(value.split())
+            if cleaned:
+                return cleaned
+
+    details = fetch_species_details(species)
+    if isinstance(details, dict):
+        for key in (
+            "description",
+            "summary",
+            "ecology",
+            "ecology_notes",
+            "notes",
+            "habitat",
+            "characteristics",
+        ):
+            value = details.get(key)
+            if isinstance(value, str):
+                cleaned = " ".join(value.split())
+                if cleaned:
+                    return cleaned
+    return ""
+
+
+def llm_rate_species(species: dict[str, Any]) -> dict[str, str] | None:
+    if not llm_enabled():
+        return None
+
+    signature = species_signature(species)
+    if not signature:
+        return None
+
+    if signature in PLANT_RATING_CACHE:
+        return PLANT_RATING_CACHE[signature]
+    if signature in PLANT_RATING_FAILED_KEYS:
+        return None
+
+    model_name = llm_model_name()
+    if not model_name:
+        return None
+
+    payload = {
+        "scientific_name": str(species.get("scientific_name") or "").strip(),
+        "common_name": best_common_name(species),
+        "habit": str(
+            species.get("plant_habit")
+            or species.get("habit")
+            or species.get("growth_habit")
+            or species.get("growth_form")
+            or ""
+        ).strip(),
+        "nativity": str(
+            species.get("nativity")
+            or species.get("nativity_status")
+            or species.get("native_status")
+            or species.get("status")
+            or ""
+        ).strip(),
+        "description": species_description_text(species),
+    }
+
+    request_body = {
+        "model": model_name,
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You rate plants for a sustainable garden planner. Return JSON ONLY with keys: "
+                    "waterUsage, pollinatorValue, droughtResistance, carbonSequestration. "
+                    "Each value must be exactly one of: Low, Medium, High. "
+                    "Be conservative: if unsure, choose Medium."
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload)},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            f"{llm_api_base_url()}/chat/completions",
+            headers=llm_headers(),
+            json=request_body,
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        PLANT_RATING_FAILED_KEYS.add(signature)
+        return None
+
+    response_payload = response.json()
+    choices = response_payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        PLANT_RATING_FAILED_KEYS.add(signature)
+        return None
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    parsed = parse_json_object_from_text(llm_message_text(content))
+    if not parsed:
+        PLANT_RATING_FAILED_KEYS.add(signature)
+        return None
+
+    def parse_rating(*keys: str) -> str:
+        for key in keys:
+            if key not in parsed:
+                continue
+            return normalize_rating(parsed.get(key), default="Medium")
+        return "Medium"
+
+    ratings = {
+        "waterUsage": parse_rating("waterUsage", "water_usage"),
+        "pollinatorValue": parse_rating("pollinatorValue", "pollinator_value"),
+        "droughtResistance": parse_rating("droughtResistance", "drought_resistance"),
+        "carbonSequestration": parse_rating("carbonSequestration", "carbon_sequestration"),
+    }
+    PLANT_RATING_CACHE[signature] = ratings
+    return ratings
+
+
 def request_llm_selected_species_ids(
     candidate_species: list[dict[str, Any]],
     zip_code: str,
@@ -1331,6 +1497,17 @@ def flora_species_to_plant(
     water_source = species.get("water_usage") or species.get("water_needs") or "Medium"
     shade_source = species.get("shade_tolerance") or species.get("shade_coverage") or "Medium"
     drought_source = species.get("drought_tolerance") or species.get("drought_resistance") or "Medium"
+    water_usage = normalize_rating(water_source, default="Medium")
+    pollinator_value = normalize_rating(pollinator_source, default="Medium")
+    carbon_value = normalize_rating(carbon_source, default="Medium")
+    drought_value = normalize_rating(drought_source, default="Medium")
+
+    llm_ratings = llm_rate_species(species)
+    if llm_ratings:
+        water_usage = llm_ratings["waterUsage"]
+        pollinator_value = llm_ratings["pollinatorValue"]
+        drought_value = llm_ratings["droughtResistance"]
+        carbon_value = llm_ratings["carbonSequestration"]
 
     return {
         "id": plant_id,
@@ -1338,11 +1515,11 @@ def flora_species_to_plant(
         "emoji": flora_emoji_for_species(species),
         "zones": parse_zones(species, zone_hint),
         "nativeRegions": ["native"] if is_native else [],
-        "waterUsage": normalize_rating(water_source, default="Medium"),
-        "pollinatorValue": normalize_rating(pollinator_source, default="Medium"),
-        "carbonSequestration": normalize_rating(carbon_source, default="Medium"),
+        "waterUsage": water_usage,
+        "pollinatorValue": pollinator_value,
+        "carbonSequestration": carbon_value,
         "shadeCoverage": normalize_rating(shade_source, default="Medium"),
-        "droughtResistance": normalize_rating(drought_source, default="Medium"),
+        "droughtResistance": drought_value,
     }
 
 
