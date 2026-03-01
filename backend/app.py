@@ -369,6 +369,15 @@ def normalize_zip_code(raw_zip: str | None) -> str | None:
     return digits[:5]
 
 
+def normalize_state_code(raw_state: str | None) -> str | None:
+    if not raw_state:
+        return None
+    letters = "".join(ch for ch in raw_state if ch.isalpha())
+    if len(letters) < 2:
+        return None
+    return letters[:2].upper()
+
+
 def normalize_plant_type(raw_plant_type: str | None) -> str | None:
     if not raw_plant_type:
         return None
@@ -1140,8 +1149,15 @@ def custom_emoji(name: str, is_flower: bool) -> str:
     return "🪴"
 
 
-def llm_rate_custom_plant(name: str, description: str) -> tuple[dict[str, Any] | None, str | None]:
-    cache_key = f"{name.strip().lower()}|{description.strip().lower()}"
+def llm_rate_custom_plant(
+    name: str,
+    description: str,
+    zip_code: str | None = None,
+    state_code: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    cache_key = (
+        f"{name.strip().lower()}|{description.strip().lower()}|{(zip_code or '').strip()}|{(state_code or '').strip()}"
+    )
     if cache_key in CUSTOM_PLANT_RATING_CACHE:
         return CUSTOM_PLANT_RATING_CACHE[cache_key], None
 
@@ -1155,6 +1171,8 @@ def llm_rate_custom_plant(name: str, description: str) -> tuple[dict[str, Any] |
     prompt_payload = {
         "name": name.strip(),
         "description": description.strip(),
+        "zip_code": (zip_code or "").strip(),
+        "state_code": (state_code or "").strip(),
     }
     request_body = {
         "model": model_name,
@@ -1167,6 +1185,7 @@ def llm_rate_custom_plant(name: str, description: str) -> tuple[dict[str, Any] |
                     "waterUsage, pollinatorValue, droughtResistance, carbonSequestration, shadeCoverage, isFlower, "
                     "waterEfficiencyScore, pollinatorSupportScore, droughtResistanceScore, carbonImpactScore. "
                     "Rating keys must be Low/Medium/High. Score keys must be integers 0-100. "
+                    "Use zip_code/state_code context when provided. "
                     "Be conservative and choose Medium/50 when uncertain."
                 ),
             },
@@ -1771,6 +1790,7 @@ def flora_recommendations_for_zip(
         "label": f"ZIP {zip_code}",
         "zone": zone_hint,
         "region": "generic",
+        "state": state_code,
     }
     filter_metadata = {
         "plantType": normalized_plant_type,
@@ -1978,6 +1998,10 @@ def create_custom_plant() -> Any:
     payload = request.get_json(silent=True) or {}
     raw_name = payload.get("name") or payload.get("plantName") or payload.get("plant_name")
     raw_description = payload.get("description") or payload.get("notes") or ""
+    zip_code = normalize_zip_code(payload.get("zipCode") or payload.get("zip_code"))
+    state_code = normalize_state_code(
+        payload.get("state") or payload.get("stateCode") or payload.get("state_code")
+    )
 
     if not isinstance(raw_name, str) or not raw_name.strip():
         return jsonify({"error": "Plant name is required."}), 400
@@ -1985,7 +2009,12 @@ def create_custom_plant() -> Any:
     name = " ".join(raw_name.strip().split())[:80]
     description = str(raw_description).strip()[:400]
 
-    ratings, llm_error = llm_rate_custom_plant(name, description)
+    ratings, llm_error = llm_rate_custom_plant(
+        name,
+        description,
+        zip_code=zip_code,
+        state_code=state_code,
+    )
     if not ratings:
         status_code = 503 if not llm_enabled() else 502
         return (
@@ -2030,6 +2059,8 @@ def create_custom_plant() -> Any:
             "source": "user-input",
             "llmEnabled": llm_enabled(),
             "llmModel": llm_model_name() if llm_enabled() else None,
+            "zipCode": zip_code,
+            "state": state_code,
         }
     )
 
@@ -2088,6 +2119,7 @@ def recommendations() -> Any:
                 "climate": climate_profile,
                 "plants": flora_plants,
                 "zipCode": zip_code,
+                "state": climate_profile.get("state"),
                 "floraEnabled": True,
                 "source": "flora",
                 "plantType": normalized_plant_type,
@@ -2111,6 +2143,7 @@ def recommendations() -> Any:
             "climate": climate_profile,
             "plants": recommend_plants(climate_profile),
             "source": "local",
+            "state": climate_profile.get("state"),
             "plantType": normalized_plant_type,
             "plantQuery": normalized_plant_query,
         }
@@ -2173,6 +2206,7 @@ def recommendations_by_zip_code() -> Any:
             "climate": climate_profile,
             "plants": flora_plants,
             "zipCode": zip_code,
+            "state": climate_profile.get("state"),
             "floraEnabled": True,
             "source": "flora",
             "plantType": normalized_plant_type,
