@@ -196,6 +196,35 @@ function defaultClimate(options: ClimateProfile[]): ClimateProfile {
   return options[0] ?? DEFAULT_CLIMATE_OPTIONS[0];
 }
 
+// type DraggablePlantProps = {
+//   item: PlacedPlant; plant: Plant; selected: boolean;
+//   canvasWidth: number; canvasHeight: number;
+//   onMove: (id: string, x: number, y: number) => void;
+//   onSelect: (id: string) => void;
+// };
+
+// function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMove, onSelect }: DraggablePlantProps) {
+//   const dragOrigin = useRef({ x: item.x, y: item.y });
+//   const panResponder = useMemo(() =>
+//     PanResponder.create({
+//       onStartShouldSetPanResponder: () => true,
+//       onMoveShouldSetPanResponder: () => true,
+//       onPanResponderGrant: () => { dragOrigin.current = { x: item.x, y: item.y }; onSelect(item.instanceId); },
+//       onPanResponderMove: (_e, g) => {
+//         onMove(item.instanceId,
+//           clamp(dragOrigin.current.x + g.dx, 0, Math.max(0, canvasWidth - item.size)),
+//           clamp(dragOrigin.current.y + g.dy, 0, Math.max(0, canvasHeight - item.size)));
+//       },
+//     }), [canvasHeight, canvasWidth, item.instanceId, item.size, item.x, item.y, onMove, onSelect]);
+
+//   return (
+//     <View {...panResponder.panHandlers}
+//       style={[styles.placedPlant, selected && styles.placedPlantSelected,
+//         { left: item.x, top: item.y, width: item.size, height: item.size }]}>
+//       <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
+//     </View>
+//   );
+// }
 type DraggablePlantProps = {
   item: PlacedPlant; plant: Plant; selected: boolean;
   canvasWidth: number; canvasHeight: number;
@@ -204,28 +233,99 @@ type DraggablePlantProps = {
 };
 
 function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMove, onSelect }: DraggablePlantProps) {
-  const dragOrigin = useRef({ x: item.x, y: item.y });
-  const panResponder = useMemo(() =>
-    PanResponder.create({
+  const sizeRef = useRef(item.size);
+  const canvasRef = useRef({ width: canvasWidth, height: canvasHeight });
+  const dragState = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const viewRef = useRef<any>(null);
+
+  useEffect(() => { sizeRef.current = item.size; }, [item.size]);
+  useEffect(() => { canvasRef.current = { width: canvasWidth, height: canvasHeight }; }, [canvasWidth, canvasHeight]);
+
+  // Web: use pointer events with capture so mouseup always fires
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const el = viewRef.current as HTMLElement | null;
+    if (!el) return;
+
+    function onPointerDown(e: PointerEvent) {
+      e.preventDefault();
+      el!.setPointerCapture(e.pointerId); // 👈 this is the key — captures all pointer events including mouseup anywhere on screen
+      dragState.current = { startX: e.clientX, startY: e.clientY, originX: item.x, originY: item.y };
+      onSelect(item.instanceId);
+      el!.style.cursor = 'grabbing';
+    }
+
+    function onPointerMove(e: PointerEvent) {
+      if (!dragState.current) return;
+      const dx = e.clientX - dragState.current.startX;
+      const dy = e.clientY - dragState.current.startY;
+      const { width, height } = canvasRef.current;
+      const size = sizeRef.current;
+      onMove(
+        item.instanceId,
+        clamp(dragState.current.originX + dx, 0, Math.max(0, width - size)),
+        clamp(dragState.current.originY + dy, 0, Math.max(0, height - size)),
+      );
+    }
+
+    function onPointerUp(e: PointerEvent) {
+      dragState.current = null;
+      el!.style.cursor = 'grab';
+    }
+
+    el.style.cursor = 'grab';
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerUp);
+
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, [item.instanceId, item.x, item.y, onMove, onSelect]); // x/y here is fine — we only read them on pointerdown
+
+  // Native: keep PanResponder for iOS/Android
+  const panResponder = useMemo(() => {
+    if (Platform.OS === 'web') return { panHandlers: {} };
+    return PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => { dragOrigin.current = { x: item.x, y: item.y }; onSelect(item.instanceId); },
-      onPanResponderMove: (_e, g) => {
-        onMove(item.instanceId,
-          clamp(dragOrigin.current.x + g.dx, 0, Math.max(0, canvasWidth - item.size)),
-          clamp(dragOrigin.current.y + g.dy, 0, Math.max(0, canvasHeight - item.size)));
+      onPanResponderGrant: () => {
+        dragState.current = { startX: 0, startY: 0, originX: item.x, originY: item.y };
+        onSelect(item.instanceId);
       },
-    }), [canvasHeight, canvasWidth, item.instanceId, item.size, item.x, item.y, onMove, onSelect]);
+      onPanResponderMove: (_e, g) => {
+        if (!dragState.current) return;
+        const { width, height } = canvasRef.current;
+        const size = sizeRef.current;
+        onMove(
+          item.instanceId,
+          clamp(dragState.current.originX + g.dx, 0, Math.max(0, width - size)),
+          clamp(dragState.current.originY + g.dy, 0, Math.max(0, height - size)),
+        );
+      },
+      onPanResponderRelease: () => { dragState.current = null; },
+      onPanResponderTerminate: () => { dragState.current = null; },
+    });
+  }, [item.instanceId, item.x, item.y, onMove, onSelect]);
 
   return (
-    <View {...panResponder.panHandlers}
-      style={[styles.placedPlant, selected && styles.placedPlantSelected,
-        { left: item.x, top: item.y, width: item.size, height: item.size }]}>
+    <View
+      ref={viewRef}
+      {...panResponder.panHandlers}
+      style={[
+        styles.placedPlant,
+        selected && styles.placedPlantSelected,
+        { left: item.x, top: item.y, width: item.size, height: item.size },
+      ]}
+    >
       <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
     </View>
   );
 }
-
 export default function HomeScreen() {
   const [selectedClimateId, setSelectedClimateId] = useState(defaultClimate(DEFAULT_CLIMATE_OPTIONS).id);
   const [placedPlants, setPlacedPlants] = useState<PlacedPlant[]>([]);
