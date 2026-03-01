@@ -6,9 +6,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-import requests
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import requests # type: ignore
+from flask import Flask, jsonify, request # type: ignore
+from flask_cors import CORS # type: ignore
 
 app = Flask(__name__)
 CORS(app)
@@ -1500,9 +1500,8 @@ def compute_metrics(
     biodiversity = round(
         clamp((unique_species / len(plants)) * 70 + min(unique_species, 6) * 5 + 25, 0, 100)
     )
-    weekly_water_demand = round(
-        sum(WATER_UNITS[plant["waterUsage"]] * weight for plant, weight in resolved_entries)
-    )
+    # Plant size affects visual footprint, not weekly watering units.
+    weekly_water_demand = round(sum(WATER_UNITS[plant["waterUsage"]] for plant, _weight in resolved_entries))
 
     sustainability_score = round(
         native_percent * 0.28

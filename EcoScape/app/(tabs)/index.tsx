@@ -184,7 +184,8 @@ function computeMetrics(
   const nativePercent = weightTotal > 0 ? Math.round((nativeWeight / weightTotal) * 100) : 0;
   const uniqueSpecies = new Set(plants.map(p => p.id)).size;
   const biodiversity = Math.round(clamp((uniqueSpecies / plants.length) * 70 + Math.min(uniqueSpecies, 6) * 5 + 25, 0, 100));
-  const weeklyWaterDemand = Math.round(resolved.reduce((s, e) => s + WATER_UNITS[e.plant.waterUsage] * e.weight, 0));
+  // Plant size affects layout only; watering units are per placed plant.
+  const weeklyWaterDemand = Math.round(resolved.reduce((s, e) => s + WATER_UNITS[e.plant.waterUsage], 0));
   const sustainabilityScore = Math.round(
     nativePercent * 0.28 + waterEfficiency * 0.24 + pollinatorSupport * 0.16 +
     droughtResistance * 0.14 + biodiversity * 0.1 + carbonImpact * 0.08
@@ -728,9 +729,6 @@ export default function HomeScreen() {
                       <Text style={styles.plantEmoji}>{plant.emoji}</Text>
                       <Text style={styles.plantName}>{plant.name}</Text>
                       <View style={styles.plantTags}>
-                        <Text style={styles.plantTag}>💧 {plant.waterUsage}</Text>
-                        <Text style={styles.plantTag}>🐝 {plant.pollinatorValue}</Text>
-                        <Text style={styles.plantTag}>☀️ {plant.droughtResistance}</Text>
                       </View>
                       <Pressable style={styles.addBtn} onPress={() => addPlantToCanvas(plant)}>
                         <Text style={styles.addBtnText}>+ Add to Canvas</Text>
