@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 
 type Rating = 'Low' | 'Medium' | 'High';
-type Region = 'CA' | 'Southwest' | 'PacificNW' | 'Southeast';
+type Region = string;
 
 type ClimateProfile = {
   id: string;
@@ -57,8 +57,10 @@ type SustainabilityMetrics = {
 type ApiConfigResponse = {
   climateOptions: ClimateProfile[];
   plantLibrary: Plant[];
-  plantTypeOptions?: { id: string; label: string }[];
-  integrations?: { flora?: { enabled?: boolean; baseUrl?: string } };
+  integrations?: {
+    flora?: { enabled?: boolean; baseUrl?: string };
+    llm?: { enabled?: boolean; provider?: string; model?: string | null };
+  };
 };
 
 type ApiRecommendationsResponse = {
@@ -71,6 +73,13 @@ type ApiRecommendationsResponse = {
   plantType?: string | null;
   filterRelaxed?: boolean;
   strictMatchCount?: number;
+  selectionMethod?: 'llm' | 'heuristic' | string;
+  candidateCount?: number;
+  candidatePoolCount?: number;
+  curatedCount?: number;
+  llmEnabled?: boolean;
+  llmModel?: string | null;
+  llmError?: string | null;
   error?: string;
   detail?: string;
 };
@@ -91,17 +100,6 @@ const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
   { id: 'santa-barbara', label: 'Santa Barbara, CA', zone: '9b', region: 'CA' },
   { id: 'phoenix', label: 'Phoenix, AZ', zone: '10b', region: 'Southwest' },
   { id: 'seattle', label: 'Seattle, WA', zone: '8b', region: 'PacificNW' },
-];
-
-const DEFAULT_PLANT_TYPE_OPTIONS: { id: string; label: string }[] = [
-  { id: 'any', label: 'Any' },
-  { id: 'flower', label: 'Flower' },
-  { id: 'fruit', label: 'Fruit' },
-  { id: 'bush', label: 'Bush' },
-  { id: 'tree', label: 'Tree' },
-  { id: 'vine', label: 'Vine' },
-  { id: 'grass', label: 'Grass' },
-  { id: 'succulent', label: 'Succulent' },
 ];
 
 const DEFAULT_PLANT_LIBRARY: Plant[] = [
@@ -179,7 +177,9 @@ function computeMetrics(
   const pollinatorSupport = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.pollinatorValue]), weights));
   const droughtResistance = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.droughtResistance]), weights));
   const carbonImpact = Math.round(weightedAverage(plants.map(p => RATING_POINTS[p.carbonSequestration]), weights));
-  const nativeWeight = resolved.filter(e => e.plant.nativeRegions.includes(climate.region)).reduce((s, e) => s + e.weight, 0);
+  const nativeWeight = resolved
+    .filter(e => e.plant.nativeRegions.includes(climate.region) || e.plant.nativeRegions.includes('native'))
+    .reduce((s, e) => s + e.weight, 0);
   const nativePercent = weightTotal > 0 ? Math.round((nativeWeight / weightTotal) * 100) : 0;
   const uniqueSpecies = new Set(plants.map(p => p.id)).size;
   const biodiversity = Math.round(clamp((uniqueSpecies / plants.length) * 70 + Math.min(uniqueSpecies, 6) * 5 + 25, 0, 100));
@@ -231,8 +231,6 @@ export default function HomeScreen() {
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
   const [zipCodeInput, setZipCodeInput] = useState('');
   const [activeZipCode, setActiveZipCode] = useState<string | null>(null);
-  const [selectedPlantType, setSelectedPlantType] = useState('any');
-  const [plantTypeOptions, setPlantTypeOptions] = useState(DEFAULT_PLANT_TYPE_OPTIONS);
   const [zipLookupLoading, setZipLookupLoading] = useState(false);
   const [zipLookupMessage, setZipLookupMessage] = useState<string | null>(null);
   const [zipLookupError, setZipLookupError] = useState(false);
@@ -253,10 +251,6 @@ export default function HomeScreen() {
   const selectedClimate = useMemo(
     () => climateOptions.find(p => p.id === selectedClimateId) ?? defaultClimate(climateOptions),
     [climateOptions, selectedClimateId]
-  );
-  const selectedPlantTypeLabel = useMemo(
-    () => plantTypeOptions.find(o => o.id === selectedPlantType)?.label ?? 'Any',
-    [plantTypeOptions, selectedPlantType]
   );
   const canvasWidth = canvasDimensions.width;
   const canvasHeight = canvasDimensions.height;
@@ -301,15 +295,12 @@ export default function HomeScreen() {
         if (cancelled) return;
         const nextClimate = payload.climateOptions?.length ? payload.climateOptions : DEFAULT_CLIMATE_OPTIONS;
         const nextPlants = payload.plantLibrary?.length ? payload.plantLibrary : DEFAULT_PLANT_LIBRARY;
-        const serverTypes = payload.plantTypeOptions?.length ? payload.plantTypeOptions : DEFAULT_PLANT_TYPE_OPTIONS.filter(o => o.id !== 'any');
-        const nextTypes = [DEFAULT_PLANT_TYPE_OPTIONS[0], ...serverTypes.filter(o => o.id !== 'any')];
-        setClimateOptions(nextClimate); setPlantLibrary(nextPlants); setPlantTypeOptions(nextTypes);
-        setSelectedPlantType(t => nextTypes.some(o => o.id === t) ? t : 'any');
+        setClimateOptions(nextClimate); setPlantLibrary(nextPlants);
         setSelectedClimateId(id => nextClimate.some(p => p.id === id) ? id : defaultClimate(nextClimate).id);
         setBackendStatus('connected'); setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
       } catch {
         if (cancelled) return;
-        setClimateOptions(DEFAULT_CLIMATE_OPTIONS); setPlantLibrary(DEFAULT_PLANT_LIBRARY); setPlantTypeOptions(DEFAULT_PLANT_TYPE_OPTIONS);
+        setClimateOptions(DEFAULT_CLIMATE_OPTIONS); setPlantLibrary(DEFAULT_PLANT_LIBRARY);
         setBackendStatus('offline'); setBackendMessage('Flask API not reachable. Using local fallback model.');
       }
     }
@@ -519,10 +510,9 @@ export default function HomeScreen() {
     const zip = normalizeZipCode(zipCodeInput);
     if (!zip) { setZipLookupMessage('Enter a valid 5-digit ZIP code.'); setZipLookupError(true); return; }
     setZipLookupLoading(true); setZipLookupError(false);
-    setZipLookupMessage(selectedPlantType === 'any' ? 'Looking up Flora recommendations...' : `Looking up ${selectedPlantTypeLabel.toLowerCase()} recommendations...`);
+    setZipLookupMessage('Looking up Flora recommendations...');
     try {
-      const typeParam = selectedPlantType !== 'any' ? `&plantType=${encodeURIComponent(selectedPlantType)}` : '';
-      const res = await fetch(`${API_BASE_URL}/api/recommendations/zipcode?zipCode=${encodeURIComponent(zip)}${typeParam}`);
+      const res = await fetch(`${API_BASE_URL}/api/recommendations/zipcode?zipCode=${encodeURIComponent(zip)}`);
       const payload = await res.json() as ApiRecommendationsResponse;
       if (!res.ok || payload.error) throw new Error(payload.detail || payload.error || `ZIP lookup failed (${res.status}).`);
       if (!payload.plants?.length) throw new Error('No Flora recommendations returned for this ZIP code.');
@@ -530,11 +520,7 @@ export default function HomeScreen() {
       setClimateOptions(curr => { const f = curr.filter(p => p.id !== payload.climate.id); return [payload.climate, ...f]; });
       setSelectedClimateId(payload.climate.id); setRecommendations(payload.plants); setActiveZipCode(zip); setZipCodeInput(zip);
       setZipLookupError(false);
-      const base = selectedPlantType === 'any'
-        ? `Loaded ${payload.plants.length} recommendation${payload.plants.length === 1 ? '' : 's'} for ZIP ${zip}${payload.state ? ` (${payload.state})` : ''}.`
-        : `Loaded ${payload.plants.length} ${selectedPlantTypeLabel.toLowerCase()} recommendation${payload.plants.length === 1 ? '' : 's'} for ZIP ${zip}${payload.state ? ` (${payload.state})` : ''}.`;
-      const note = selectedPlantType !== 'any' && payload.filterRelaxed ? ' Closest native matches shown.' : '';
-      setZipLookupMessage(`${base}${note}`);
+      setZipLookupMessage(null);
       setBackendStatus('connected'); setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
     } catch (err) {
       setRecommendations([]); setActiveZipCode(null); setZipLookupError(true);
@@ -559,7 +545,7 @@ export default function HomeScreen() {
         <View style={styles.heroCenter}>
           <Text style={styles.heroEyebrow}>🌿 EcoScape</Text>
           <Text style={styles.heroTitle}>Design Your{'\n'}Dream Garden</Text>
-          <Text style={styles.heroSub} >
+          <Text style={styles.heroSub}>
             Build a sustainable garden and see your eco impact!
           </Text>
         </View>
@@ -568,230 +554,227 @@ export default function HomeScreen() {
         </Pressable>
       </View>
 
-
-      {/* 1. CANVAS */}
+      {/* 1. GARDEN SETUP */}
       <View style={styles.sectionCard}>
         <View style={styles.sectionTitleRow}>
           <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>1</Text></View>
-          <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text style={styles.sectionTitle}>Layout Canvas</Text>
-            <Pressable onPress={clearCanvas} style={styles.clearBtn}>
-              <Text style={styles.clearBtnText}>Clear all</Text>
-            </Pressable>
-          </View>
-        </View>
-        <Text style={styles.hint}>Drag plants to arrange · tap to select and resize</Text>
-        <View style={styles.imageBlock}>
-          <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}>(optional)</Text></Text>
-          {/* <TextInput value={canvasImageInput} onChangeText={setCanvasImageInput} style={styles.imageInput} placeholder="https://example.com/backyard.jpg" autoCapitalize="none" autoCorrect={false} /> */}
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TextInput value={canvasImageInput} onChangeText={setCanvasImageInput} style={[styles.imageInput, { flex: 1 }]} placeholder="Backyard photo URL" autoCapitalize="none" autoCorrect={false} />
-            <TextInput value={zipCodeInput} onChangeText={setZipCodeInput} keyboardType="number-pad" maxLength={10} style={[styles.zipInput, { width: 90 }]} placeholder="ZIP" />
-          </View>
-          <View style={styles.imageButtonRow}>
-            <Pressable style={styles.imgBtnSecondary} onPress={uploadCanvasImageFromDevice}><Text style={styles.imgBtnSecondaryText}>Upload</Text></Pressable>
-            <Pressable style={styles.imgBtnPrimary} onPress={applyCanvasImage}><Text style={styles.imgBtnPrimaryText}>Use Image</Text></Pressable>
-            <Pressable style={styles.imgBtnDanger} onPress={removeCanvasImage}><Text style={styles.imgBtnDangerText}>Remove</Text></Pressable>
-          </View>
-          {canvasImageMessage
-            ? <Text style={canvasImageHasError ? styles.msgError : styles.msgInfo}>{canvasImageMessage}</Text>
-            : <Text style={styles.hint}>Upload from device or paste a hosted URL.</Text>}
-        </View>
-        <View style={styles.canvasShell}>
-          <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
-            {canvasImageUri ? (
-              <>
-                <Image source={{ uri: canvasImageUri }} style={StyleSheet.absoluteFillObject} resizeMode="cover"
-                  onLoad={(event) => {
-                    const source = event.nativeEvent?.source;
-                    const sourceWidth = Number(source?.width);
-                    const sourceHeight = Number(source?.height);
-                    if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
-                      fitCanvasToImage(sourceWidth, sourceHeight);
-                    }
-                    setCanvasImageMessage('Image loaded.');
-                    setCanvasImageHasError(false);
-                  }}
-                  onError={() => { setCanvasImageMessage('Could not load image. Check the URL.'); setCanvasImageHasError(true); }} />
-                <View pointerEvents="none" style={styles.canvasOverlay} />
-              </>
-            ) : null}
-            {/* {verticalGridLines.map((position, index) => (
-              <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
-            ))}
-            {horizontalGridLines.map((position, index) => (
-              <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
-            ))} */}
-            {placedPlants.map(item => {
-              const plant = plantsById[item.plantId];
-              if (!plant) return null;
-              return (
-                <DraggablePlant key={item.instanceId} item={item} plant={plant}
-                  selected={selectedPlantId === item.instanceId}
-                  canvasWidth={canvasWidth} canvasHeight={canvasHeight}
-                  onMove={movePlant} onSelect={setSelectedPlantId} />
-              );
-            })}
-            {placedPlants.length === 0 && (
-              <View style={styles.canvasEmpty}>
-                <Text style={styles.canvasEmptyIcon}>🌱</Text>
-                <Text style={styles.canvasEmptyText}>Add plants from section 2</Text>
-              </View>
-            )}
-            {recommendations.length > 0 && (
-              <View style={styles.canvasPlantOverlay}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.canvasPlantOverlayScroll}>
-                  {recommendations.map(plant => (
-                    <Pressable key={plant.id} style={styles.canvasPlantChip} onPress={() => addPlantToCanvas(plant)}>
-                      <Text style={styles.canvasPlantChipEmoji}>{plant.emoji}</Text>
-                      <Text style={styles.canvasPlantChipName}>{plant.name}</Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              </View>
-            )}
-          </View>
-        </View>
-        {selectedPlant && selectedPlantDetails ? (
-          <View style={styles.selPanel}>
-            <Text style={styles.selTitle}>{selectedPlantDetails.emoji} {selectedPlantDetails.name}</Text>
-            <View style={styles.selControls}>
-              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(-8)}><Text style={styles.selBtnText}>− Shrink</Text></Pressable>
-              <Text style={styles.selSize}>{selectedPlant.size}px</Text>
-              <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(8)}><Text style={styles.selBtnText}>+ Grow</Text></Pressable>
-              <Pressable style={styles.selRemove} onPress={removeSelectedPlant}><Text style={styles.selRemoveText}>Remove</Text></Pressable>
-            </View>
-          </View>
-        ) : (
-          <Text style={styles.hint}>Tap a placed plant to resize or remove it.</Text>
-        )}
-      </View>
-
-
-      {/* 2. GARDEN SETUP */}
-      <View style={styles.sectionCard}>
-        <View style={styles.sectionTitleRow}>
-          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>2</Text></View>
           <Text style={styles.sectionTitle}>Garden Setup</Text>
         </View>
-        <Text style={styles.hint}>Grid automatically fits the current canvas/image size.</Text>
-        <Text style={styles.fieldLabel}>Plant Type</Text>
-        <View style={styles.chipRow}>
-          {plantTypeOptions.map(opt => {
-            const active = opt.id === selectedPlantType;
-            return (
-              <Pressable key={opt.id}
-                onPress={() => { setSelectedPlantType(opt.id); if (activeZipCode) setZipLookupMessage(`Type set to ${opt.label}. Tap Use ZIP to refresh.`); }}
-                style={[styles.chip, active && styles.chipActive]}>
-                <Text style={[styles.chipText, active && styles.chipTextActive]}>{opt.label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        <Text style={styles.hint}>Enter ZIP code to fetch plant recommendations based on your climate.</Text>
         <Text style={styles.fieldLabel}>ZIP Code  <Text style={styles.fieldLabelMuted}>(Flora API)</Text></Text>
         <View style={styles.zipRow}>
-          <TextInput value={zipCodeInput} onChangeText={setZipCodeInput} keyboardType="number-pad" maxLength={10} style={styles.zipInput} placeholder="e.g. 94102" />
+          <TextInput
+            value={zipCodeInput}
+            onChangeText={setZipCodeInput}
+            keyboardType="number-pad"
+            maxLength={10}
+            style={styles.zipInput}
+            placeholder="e.g. 94102"
+          />
           <Pressable onPress={lookupZipRecommendations} style={[styles.zipBtn, zipLookupLoading && styles.zipBtnDisabled]} disabled={zipLookupLoading}>
             <Text style={styles.zipBtnText}>{zipLookupLoading ? 'Loading…' : 'Use ZIP'}</Text>
           </Pressable>
         </View>
         {zipLookupMessage
           ? <Text style={zipLookupError ? styles.msgError : styles.msgInfo}>{zipLookupMessage}</Text>
-          : <Text style={styles.hint}>Enter ZIP to pull climate-aware native plants via Flora API.</Text>}
+          : <Text style={styles.hint}></Text>}
       </View>
 
-      {/* 3. RECOMMENDED PLANTS */}
+      {/* 2. GARDEN STUDIO */}
       <View style={styles.sectionCard}>
         <View style={styles.sectionTitleRow}>
-          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>3</Text></View>
-          <Text style={styles.sectionTitle}>Recommended Plants</Text>
-        </View>
-        <Text style={styles.hint}>
-          {activeZipCode
-            ? `ZIP-based ${selectedPlantType === 'any' ? '' : selectedPlantTypeLabel.toLowerCase() + ' '}recommendations for ${selectedClimate.label}.`
-            : 'Enter a ZIP code above to load Flora recommendations.'}
-        </Text>
-        {recommendations.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyEmoji}>🌾</Text>
-            <Text style={styles.emptyText}>No recommendations yet.{'\n'}Enter a ZIP and tap Use ZIP.</Text>
+          <View style={styles.sectionNumBadge}><Text style={styles.sectionNum}>2</Text></View>
+          <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text style={styles.sectionTitle}>Garden Studio</Text>
+            <Pressable onPress={clearCanvas} style={styles.clearBtn}>
+              <Text style={styles.clearBtnText}>Clear canvas</Text>
+            </Pressable>
           </View>
-        ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.plantScroll}>
-            {recommendations.map(plant => {
-              const isNative = plant.nativeRegions.includes(selectedClimate.region);
-              return (
-                <View key={plant.id} style={styles.plantCard}>
-                  <View style={[styles.nativeBadge, isNative ? styles.nativeBadgeYes : styles.nativeBadgeNo]}>
-                    <Text style={styles.nativeBadgeText}>{isNative ? 'Native' : 'Adaptive'}</Text>
-                  </View>
-                  <Text style={styles.plantEmoji}>{plant.emoji}</Text>
-                  <Text style={styles.plantName}>{plant.name}</Text>
-                  <View style={styles.plantTags}>
-                    <Text style={styles.plantTag}>💧 {plant.waterUsage}</Text>
-                    <Text style={styles.plantTag}>🐝 {plant.pollinatorValue}</Text>
-                    <Text style={styles.plantTag}>☀️ {plant.droughtResistance}</Text>
-                  </View>
-                  <Pressable style={styles.addBtn} onPress={() => addPlantToCanvas(plant)}>
-                    <Text style={styles.addBtnText}>+ Add to Canvas</Text>
-                  </Pressable>
-                </View>
-              );
-            })}
-          </ScrollView>
-        )}
-      </View>
+        </View>
+        <Text style={styles.hint}>Left: add plants. Center: arrange on canvas. Right: sustainability dashboard updates live.</Text>
 
-      {/* 4. SCORE */}
-      <View style={styles.scoreCard}>
-        <View style={styles.sectionTitleRow}>
-          <View style={[styles.sectionNumBadge, styles.sectionNumBadgeDark]}><Text style={[styles.sectionNum, styles.sectionNumDark]}>4</Text></View>
-          <Text style={[styles.sectionTitle, { color: '#e8dfc8' }]}>Sustainability Report</Text>
-        </View>
-        <View style={styles.scoreHeroBlock}>
-          <View style={[styles.scoreRing, { borderColor: scoreColor(metrics.sustainabilityScore) }]}>
-            <Text style={[styles.scoreRingNum, { color: scoreColor(metrics.sustainabilityScore) }]}>{metrics.sustainabilityScore}</Text>
-            <Text style={styles.scoreRingDenom}>/100</Text>
-          </View>
-          <View style={styles.scoreHeroRight}>
-            <Text style={[styles.scorePill, { backgroundColor: scoreColor(metrics.sustainabilityScore) }]}>
-              {describeScore(metrics.sustainabilityScore)}
+        <View style={styles.workspaceRow}>
+          <View style={[styles.workspacePanel, styles.workspacePlantsPanel]}>
+            <Text style={styles.workspacePanelTitle}>Pick Plants</Text>
+            <Text style={styles.hint}>
+              {activeZipCode
+                ? `Top picks for ZIP ${activeZipCode}.`
+                : 'Load ZIP recommendations, then add plants to canvas.'}
             </Text>
-            <View style={styles.scoreMiniStats}>
-              <View style={styles.scoreMiniStat}>
-                <Text style={styles.scoreMiniNum}>{metrics.nativePercent}%</Text>
-                <Text style={styles.scoreMiniLabel}>Native</Text>
+            {recommendations.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyEmoji}>🌾</Text>
+                <Text style={styles.emptyText}>No recommendations yet.{'\n'}Enter a ZIP and tap Use ZIP.</Text>
               </View>
-              <View style={styles.scoreMiniStat}>
-                <Text style={styles.scoreMiniNum}>{metrics.weeklyWaterDemand}</Text>
-                <Text style={styles.scoreMiniLabel}>Water/wk</Text>
+            ) : (
+              <ScrollView
+                style={[styles.sidePlantScroll, { maxHeight: Math.max(320, canvasHeight + 10) }]}
+                contentContainerStyle={styles.sidePlantList}
+                showsVerticalScrollIndicator={false}>
+                {recommendations.map(plant => {
+                  const isNative = plant.nativeRegions.length > 0;
+                  return (
+                    <View key={plant.id} style={styles.sidePlantCard}>
+                      <View style={[styles.nativeBadge, isNative ? styles.nativeBadgeYes : styles.nativeBadgeNo]}>
+                        <Text style={styles.nativeBadgeText}>{isNative ? 'Native' : 'Adaptive'}</Text>
+                      </View>
+                      <Text style={styles.plantEmoji}>{plant.emoji}</Text>
+                      <Text style={styles.plantName}>{plant.name}</Text>
+                      <View style={styles.plantTags}>
+                        <Text style={styles.plantTag}>💧 {plant.waterUsage}</Text>
+                        <Text style={styles.plantTag}>🐝 {plant.pollinatorValue}</Text>
+                        <Text style={styles.plantTag}>☀️ {plant.droughtResistance}</Text>
+                      </View>
+                      <Pressable style={styles.addBtn} onPress={() => addPlantToCanvas(plant)}>
+                        <Text style={styles.addBtnText}>+ Add to Canvas</Text>
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            )}
+          </View>
+
+          <View style={[styles.workspacePanel, styles.workspaceCanvasPanel]}>
+            <View style={styles.imageBlock}>
+              <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}>(optional)</Text></Text>
+              <TextInput
+                value={canvasImageInput}
+                onChangeText={setCanvasImageInput}
+                style={styles.imageInput}
+                placeholder="Backyard photo URL"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <View style={styles.imageButtonRow}>
+                <Pressable style={styles.imgBtnSecondary} onPress={uploadCanvasImageFromDevice}><Text style={styles.imgBtnSecondaryText}>Upload</Text></Pressable>
+                <Pressable style={styles.imgBtnPrimary} onPress={applyCanvasImage}><Text style={styles.imgBtnPrimaryText}>Use Image</Text></Pressable>
+                <Pressable style={styles.imgBtnDanger} onPress={removeCanvasImage}><Text style={styles.imgBtnDangerText}>Remove</Text></Pressable>
+              </View>
+              {canvasImageMessage
+                ? <Text style={canvasImageHasError ? styles.msgError : styles.msgInfo}>{canvasImageMessage}</Text>
+                : <Text style={styles.hint}>Upload from device or paste a hosted URL.</Text>}
+            </View>
+
+            <View style={styles.canvasShell}>
+              <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
+                {canvasImageUri ? (
+                  <>
+                    <Image
+                      source={{ uri: canvasImageUri }}
+                      style={StyleSheet.absoluteFillObject}
+                      resizeMode="cover"
+                      onLoad={(event) => {
+                        const source = event.nativeEvent?.source;
+                        const sourceWidth = Number(source?.width);
+                        const sourceHeight = Number(source?.height);
+                        if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
+                          fitCanvasToImage(sourceWidth, sourceHeight);
+                        }
+                        setCanvasImageMessage('Image loaded.');
+                        setCanvasImageHasError(false);
+                      }}
+                      onError={() => {
+                        setCanvasImageMessage('Could not load image. Check the URL.');
+                        setCanvasImageHasError(true);
+                      }}
+                    />
+                    <View pointerEvents="none" style={styles.canvasOverlay} />
+                  </>
+                ) : null}
+                {verticalGridLines.map((position, index) => (
+                  <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
+                ))}
+                {horizontalGridLines.map((position, index) => (
+                  <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
+                ))}
+
+                {placedPlants.map(item => {
+                  const plant = plantsById[item.plantId];
+                  if (!plant) return null;
+                  return (
+                    <DraggablePlant
+                      key={item.instanceId}
+                      item={item}
+                      plant={plant}
+                      selected={selectedPlantId === item.instanceId}
+                      canvasWidth={canvasWidth}
+                      canvasHeight={canvasHeight}
+                      onMove={movePlant}
+                      onSelect={setSelectedPlantId}
+                    />
+                  );
+                })}
+                {placedPlants.length === 0 && (
+                  <View style={styles.canvasEmpty}>
+                  </View>
+                )}
               </View>
             </View>
+
+            {selectedPlant && selectedPlantDetails ? (
+              <View style={styles.selPanel}>
+                <Text style={styles.selTitle}>{selectedPlantDetails.emoji} {selectedPlantDetails.name}</Text>
+                <View style={styles.selControls}>
+                  <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(-8)}><Text style={styles.selBtnText}>− Shrink</Text></Pressable>
+                  <Text style={styles.selSize}>{selectedPlant.size}px</Text>
+                  <Pressable style={styles.selBtn} onPress={() => resizeSelectedPlant(8)}><Text style={styles.selBtnText}>+ Grow</Text></Pressable>
+                  <Pressable style={styles.selRemove} onPress={removeSelectedPlant}><Text style={styles.selRemoveText}>Remove</Text></Pressable>
+                </View>
+              </View>
+            ) : (
+              <Text style={styles.hint}>Tap a placed plant to resize or remove it.</Text>
+            )}
+          </View>
+
+          <View style={[styles.workspacePanel, styles.workspaceDashboardPanel]}>
+            <Text style={styles.workspacePanelTitle}>Sustainability Dashboard</Text>
+            <View style={styles.dashboardHero}>
+              <View style={[styles.scoreRing, { borderColor: scoreColor(metrics.sustainabilityScore) }]}>
+                <Text style={[styles.scoreRingNum, { color: scoreColor(metrics.sustainabilityScore) }]}>{metrics.sustainabilityScore}</Text>
+                <Text style={styles.scoreRingDenom}>/100</Text>
+              </View>
+              <View style={styles.scoreHeroRight}>
+                <Text style={[styles.scorePill, { backgroundColor: scoreColor(metrics.sustainabilityScore) }]}>
+                  {describeScore(metrics.sustainabilityScore)}
+                </Text>
+                <View style={styles.scoreMiniStats}>
+                  <View style={styles.scoreMiniStat}>
+                    <Text style={styles.scoreMiniNum}>{metrics.nativePercent}%</Text>
+                    <Text style={styles.scoreMiniLabel}>Native</Text>
+                  </View>
+                  <View style={styles.scoreMiniStat}>
+                    <Text style={styles.scoreMiniNum}>{metrics.weeklyWaterDemand}</Text>
+                    <Text style={styles.scoreMiniLabel}>Water/wk</Text>
+                  </View>
+                </View>
+              </View>
+            </View>
+            {[
+              { icon: '💧', label: 'Water Efficiency', value: metrics.waterEfficiency },
+              { icon: '🐝', label: 'Pollinator Support', value: metrics.pollinatorSupport },
+              { icon: '☀️', label: 'Drought Resistance', value: metrics.droughtResistance },
+              { icon: '🌍', label: 'Biodiversity', value: metrics.biodiversity },
+              { icon: '🌳', label: 'Carbon Impact', value: metrics.carbonImpact },
+            ].map(m => (
+              <View key={m.label} style={styles.metricRowLight}>
+                <Text style={styles.metricIcon}>{m.icon}</Text>
+                <View style={styles.metricBody}>
+                  <View style={styles.metricTop}>
+                    <Text style={styles.metricLabelLight}>{m.label}</Text>
+                    <Text style={styles.metricValueLight}>{describeScore(m.value)} · {m.value}</Text>
+                  </View>
+                  <View style={styles.metricTrackLight}>
+                    <View style={[styles.metricFill, { width: `${m.value}%` as any, backgroundColor: m.value >= 70 ? '#6a9e55' : m.value >= 50 ? '#b8860b' : '#b5451b' }]} />
+                  </View>
+                </View>
+              </View>
+            ))}
+            <Text style={styles.dashboardFooter}>
+              {backendStatus === 'connected' ? '🟢' : backendStatus === 'checking' ? '🟡' : '🔴'} {backendMessage}
+            </Text>
           </View>
         </View>
-        {[
-          { icon: '💧', label: 'Water Efficiency', value: metrics.waterEfficiency },
-          { icon: '🐝', label: 'Pollinator Support', value: metrics.pollinatorSupport },
-          { icon: '☀️', label: 'Drought Resistance', value: metrics.droughtResistance },
-          { icon: '🌍', label: 'Biodiversity', value: metrics.biodiversity },
-          { icon: '🌳', label: 'Carbon Impact', value: metrics.carbonImpact },
-        ].map(m => (
-          <View key={m.label} style={styles.metricRow}>
-            <Text style={styles.metricIcon}>{m.icon}</Text>
-            <View style={styles.metricBody}>
-              <View style={styles.metricTop}>
-                <Text style={styles.metricLabel}>{m.label}</Text>
-                <Text style={styles.metricValue}>{describeScore(m.value)} · {m.value}</Text>
-              </View>
-              <View style={styles.metricTrack}>
-                <View style={[styles.metricFill, { width: `${m.value}%` as any, backgroundColor: m.value >= 70 ? '#6a9e55' : m.value >= 50 ? '#b8860b' : '#b5451b' }]} />
-              </View>
-            </View>
-          </View>
-        ))}
-        <Text style={styles.scoreFooter}>
-          {backendStatus === 'connected' ? '🟢' : backendStatus === 'checking' ? '🟡' : '🔴'} {backendMessage}
-        </Text>
       </View>
 
     </ScrollView>
@@ -842,6 +825,15 @@ getStartedText: {
   hint: { fontSize: 12, color: '#9c8b72', lineHeight: 17 },
   msgInfo: { fontSize: 12, color: '#3a6040', lineHeight: 17 },
   msgError: { fontSize: 12, color: '#9f3412', lineHeight: 17, fontWeight: '600' },
+  workspaceRow: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', gap: 12, alignItems: 'stretch' },
+  workspacePanel: { borderRadius: 16, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', padding: 12, gap: 8 },
+  workspacePlantsPanel: Platform.OS === 'web' ? { width: 250 } : { width: '100%' },
+  workspaceCanvasPanel: { flex: 1, minWidth: 0 },
+  workspaceDashboardPanel: Platform.OS === 'web' ? { width: 300 } : { width: '100%' },
+  workspacePanelTitle: { fontSize: 16, fontWeight: '800', color: BROWN },
+  sidePlantScroll: { flexGrow: 0 },
+  sidePlantList: { gap: 10, paddingBottom: 4 },
+  sidePlantCard: { borderRadius: 14, borderWidth: 1.5, borderColor: SOFT, backgroundColor: WARM_WHITE, padding: 10, gap: 6 },
 
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7 },
@@ -916,25 +908,31 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
   selRemove: { marginLeft: 'auto', borderWidth: 1.5, borderColor: '#e0c0b0', backgroundColor: '#fff5f0', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
   selRemoveText: { color: '#8f3010', fontWeight: '700', fontSize: 12 },
 
+  dashboardHero: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   scoreCard: { backgroundColor: FOREST, borderRadius: 22, marginHorizontal: 14, padding: 18, gap: 12 },
   scoreHeroBlock: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  scoreRing: { width: 100, height: 100, borderRadius: 50, borderWidth: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.07)' },
+  scoreRing: { width: 94, height: 94, borderRadius: 47, borderWidth: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f3ece0' },
   scoreRingNum: { fontSize: 30, fontWeight: '900' },
-  scoreRingDenom: { fontSize: 11, color: '#8aad70', fontWeight: '600' },
+  scoreRingDenom: { fontSize: 11, color: '#8f7a5d', fontWeight: '600' },
   scoreHeroRight: { flex: 1, gap: 10 },
   scorePill: { alignSelf: 'flex-start', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5, color: '#fff', fontSize: 12, fontWeight: '800', overflow: 'hidden' },
   scoreMiniStats: { flexDirection: 'row', gap: 10 },
-  scoreMiniStat: { backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 10, padding: 10, flex: 1 },
-  scoreMiniNum: { color: '#f0e8d0', fontSize: 18, fontWeight: '900' },
-  scoreMiniLabel: { color: '#8aad70', fontSize: 10, fontWeight: '600', marginTop: 2 },
+  scoreMiniStat: { backgroundColor: '#f2ebdf', borderRadius: 10, padding: 10, flex: 1 },
+  scoreMiniNum: { color: BROWN, fontSize: 18, fontWeight: '900' },
+  scoreMiniLabel: { color: '#7f705a', fontSize: 10, fontWeight: '600', marginTop: 2 },
 
   metricRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+  metricRowLight: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   metricIcon: { fontSize: 18, width: 26, textAlign: 'center' },
   metricBody: { flex: 1, gap: 4 },
   metricTop: { flexDirection: 'row', justifyContent: 'space-between' },
   metricLabel: { color: '#c8d8b8', fontSize: 13, fontWeight: '600' },
+  metricLabelLight: { color: MID_BROWN, fontSize: 13, fontWeight: '600' },
   metricValue: { color: '#f0e8d0', fontSize: 12, fontWeight: '700' },
+  metricValueLight: { color: BROWN, fontSize: 12, fontWeight: '700' },
   metricTrack: { height: 5, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 3, overflow: 'hidden' },
+  metricTrackLight: { height: 5, backgroundColor: '#e4d7c4', borderRadius: 3, overflow: 'hidden' },
   metricFill: { height: 5, borderRadius: 3 },
   scoreFooter: { fontSize: 11, color: 'rgba(180,200,160,0.6)', textAlign: 'center', marginTop: 4 },
+  dashboardFooter: { fontSize: 11, color: '#7d6a55', textAlign: 'center', marginTop: 6 },
 });

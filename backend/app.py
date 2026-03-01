@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import os
-import random
 import re
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,20 @@ load_env_file(PROJECT_ROOT / ".env")
 
 FLORA_API_BASE_URL = os.getenv("FLORA_API_BASE_URL", "https://api.floraapi.com").rstrip("/")
 FLORA_API_KEY = os.getenv("FLORA_API_KEY", "").strip()
+OPENROUTER_API_BASE_URL = os.getenv(
+    "OPENROUTER_API_BASE_URL", os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+).rstrip("/")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", os.getenv("APP_URL", "")).strip()
+OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", os.getenv("APP_NAME", "EcoScape")).strip()
+OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
+MAX_SPECIES_BUFFER = 260
+LLM_CANDIDATE_LIMIT = 120
+CURATED_RESULT_LIMIT = 10
 
 DEFAULT_CLIMATE_PROFILE: dict[str, str] = {
     "id": "local",
@@ -141,6 +155,68 @@ def flora_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return response.json()
 
 
+def llm_enabled() -> bool:
+    return llm_provider() is not None
+
+
+def llm_provider() -> str | None:
+    if OPENROUTER_API_KEY:
+        return "openrouter"
+    if OPENAI_API_KEY:
+        return "openai"
+    return None
+
+
+def llm_api_base_url() -> str:
+    provider = llm_provider()
+    if provider == "openrouter":
+        return OPENROUTER_API_BASE_URL
+    return OPENAI_API_BASE_URL
+
+
+def llm_api_key() -> str:
+    provider = llm_provider()
+    if provider == "openrouter":
+        return OPENROUTER_API_KEY
+    return OPENAI_API_KEY
+
+
+def llm_model_name() -> str | None:
+    provider = llm_provider()
+    if provider == "openrouter":
+        return OPENROUTER_MODEL
+    if provider == "openai":
+        return OPENAI_MODEL
+    return None
+
+
+def llm_headers() -> dict[str, str]:
+    provider = llm_provider()
+    headers = {
+        "Authorization": f"Bearer {llm_api_key()}",
+        "Content-Type": "application/json",
+    }
+    if provider == "openrouter":
+        if OPENROUTER_HTTP_REFERER:
+            headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+        if OPENROUTER_X_TITLE:
+            headers["X-Title"] = OPENROUTER_X_TITLE
+    return headers
+
+
+def species_signature(species: dict[str, Any]) -> str:
+    raw_identifier = (
+        species.get("id")
+        or species.get("species_id")
+        or species.get("identifier")
+        or species.get("usda_symbol")
+        or species.get("scientific_name")
+        or species.get("common_name")
+        or ""
+    )
+    return str(raw_identifier).strip().lower().replace(" ", "-")
+
+
 def normalize_zip_code(raw_zip: str | None) -> str | None:
     if not raw_zip:
         return None
@@ -206,22 +282,14 @@ def fetch_species_entries_from_candidates(
                 }
             )
             for species in species_entries:
-                signature = str(
-                    species.get("id")
-                    or species.get("species_id")
-                    or species.get("identifier")
-                    or species.get("usda_symbol")
-                    or species.get("scientific_name")
-                    or species.get("common_name")
-                    or ""
-                ).strip()
+                signature = species_signature(species)
                 if not signature:
                     continue
                 if signature in seen_signatures:
                     continue
                 seen_signatures.add(signature)
                 collected.append(species)
-                if len(collected) >= 150:
+                if len(collected) >= MAX_SPECIES_BUFFER:
                     break
         except requests.RequestException as exc:
             last_error = exc
@@ -562,6 +630,315 @@ def parse_zones(species: dict[str, Any], zone_hint: str) -> list[str]:
     return [zone_hint]
 
 
+def unique_species_entries(species_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique_entries: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    for species in species_entries:
+        signature = species_signature(species)
+        if not signature or signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        unique_entries.append(species)
+    return unique_entries
+
+
+def species_summary_for_llm(species: dict[str, Any]) -> dict[str, Any]:
+    def coerce_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    return {
+        "id": species_signature(species),
+        "common_name": str(species.get("common_name") or "").strip(),
+        "scientific_name": str(species.get("scientific_name") or "").strip(),
+        "habit": str(
+            species.get("habit")
+            or species.get("plant_habit")
+            or species.get("growth_habit")
+            or species.get("growth_form")
+            or ""
+        ).strip(),
+        "nativity_status": str(
+            species.get("nativity_status") or species.get("native_status") or species.get("status") or ""
+        ).strip(),
+        "water_needs": str(species.get("water_usage") or species.get("water_needs") or "").strip(),
+        "pollinator_value": str(
+            species.get("pollinator_value")
+            or species.get("pollinator_support")
+            or species.get("wildlife_value")
+            or species.get("wildlife_support")
+            or ""
+        ).strip(),
+        "drought_tolerance": str(
+            species.get("drought_tolerance") or species.get("drought_resistance") or ""
+        ).strip(),
+        "edible_parts": coerce_list(species.get("edible_parts")),
+        "flower_color": str(species.get("flower_color") or species.get("flowerColor") or "").strip(),
+    }
+
+
+def llm_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+                continue
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    chunks.append(text_value)
+        return "\n".join(chunks)
+    return ""
+
+
+def parse_json_object_from_text(raw_text: str) -> dict[str, Any] | None:
+    if not raw_text:
+        return None
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        payload = json.loads(raw_text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def request_llm_selected_species_ids(
+    candidate_species: list[dict[str, Any]],
+    zip_code: str,
+    state_code: str,
+    plant_type: str | None,
+    plant_query: str | None,
+) -> tuple[list[str], str | None]:
+    if not llm_enabled():
+        return [], "No LLM key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY."
+    model_name = llm_model_name()
+    if not model_name:
+        return [], "No LLM model configured."
+
+    prompt_payload = {
+        "zip_code": zip_code,
+        "state_code": state_code,
+        "plant_type_filter": plant_type or "any",
+        "user_query": plant_query or "",
+        "target_count": CURATED_RESULT_LIMIT,
+        "candidates": [species_summary_for_llm(species) for species in candidate_species],
+    }
+
+    request_body = {
+        "model": model_name,
+        "temperature": 0.2,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You curate plants for real home gardens. Choose the 10 best plants people would likely want: "
+                    "Return JSON only: {\"selected_ids\": [\"id1\", \"id2\", ...]} using only provided candidate ids."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt_payload)},
+        ],
+    }
+
+    try:
+        response = requests.post(
+            f"{llm_api_base_url()}/chat/completions",
+            headers=llm_headers(),
+            json=request_body,
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        return [], str(exc)
+
+    payload = response.json()
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return [], "LLM response did not contain choices."
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    parsed = parse_json_object_from_text(llm_message_text(content))
+    if not parsed:
+        return [], "LLM response was not parseable JSON."
+
+    raw_ids = parsed.get("selected_ids")
+    if not isinstance(raw_ids, list):
+        return [], "LLM JSON did not include selected_ids."
+
+    selected_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in raw_ids:
+        normalized = str(raw_id).strip().lower().replace(" ", "-")
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        selected_ids.append(normalized)
+        if len(selected_ids) >= CURATED_RESULT_LIMIT:
+            break
+    return selected_ids, None
+
+
+def heuristic_desirability_score(species: dict[str, Any], plant_type: str | None) -> float:
+    score = 0.0
+
+    common_name = str(species.get("common_name") or "").strip()
+    scientific_name = str(species.get("scientific_name") or "").strip()
+    if common_name:
+        score += 2.2
+    if scientific_name:
+        score += 0.6
+
+    nativity_text = str(
+        species.get("nativity_status") or species.get("native_status") or species.get("status") or ""
+    ).lower()
+    if nativity_text:
+        if "native" in nativity_text and "introduced" not in nativity_text and "non-native" not in nativity_text:
+            score += 3.2
+        if "invasive" in nativity_text:
+            score -= 5.0
+
+    water_rating = normalize_rating(species.get("water_usage") or species.get("water_needs"), default="Medium")
+    score += {"Low": 2.6, "Medium": 1.4, "High": 0.2}[water_rating]
+
+    pollinator_rating = normalize_rating(
+        species.get("pollinator_value")
+        or species.get("pollinator_support")
+        or species.get("wildlife_value")
+        or species.get("wildlife_support"),
+        default="Medium",
+    )
+    score += {"Low": 0.5, "Medium": 1.2, "High": 2.4}[pollinator_rating]
+
+    drought_rating = normalize_rating(
+        species.get("drought_tolerance") or species.get("drought_resistance"), default="Medium"
+    )
+    score += {"Low": 0.4, "Medium": 1.1, "High": 1.9}[drought_rating]
+
+    text_blob = species_text_blob(species)
+    for keyword, bonus in (
+        ("ornamental", 1.2),
+        ("showy", 1.1),
+        ("fragrant", 0.9),
+        ("evergreen", 0.8),
+        ("pollinator", 0.8),
+        ("butterfly", 0.8),
+        ("edible", 0.8),
+        ("fruit", 0.6),
+        ("flower", 0.6),
+    ):
+        if keyword in text_blob:
+            score += bonus
+    for keyword, penalty in (("toxic", 1.8), ("poison", 2.0), ("invasive", 4.0)):
+        if keyword in text_blob:
+            score -= penalty
+
+    if plant_type and species_strict_match(species, plant_type):
+        score += 2.8
+    elif plant_type:
+        score -= 0.6
+
+    signature = species_signature(species)
+    if signature:
+        score += sum((index + 1) * ord(char) for index, char in enumerate(signature[:24])) % 17 / 100.0
+    return score
+
+
+def heuristic_select_species(
+    candidate_species: list[dict[str, Any]],
+    plant_type: str | None,
+    desired_count: int,
+    excluded_signatures: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    excluded = excluded_signatures or set()
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+    for species in candidate_species:
+        signature = species_signature(species)
+        if not signature or signature in excluded:
+            continue
+        tie_breaker = sum(ord(char) for char in signature[:16]) % 29
+        scored.append((heuristic_desirability_score(species, plant_type), tie_breaker, species))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored[:desired_count]]
+
+
+def curate_species_for_garden(
+    species_entries: list[dict[str, Any]],
+    zip_code: str,
+    state_code: str,
+    plant_type: str | None,
+    plant_query: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    unique_candidates = unique_species_entries(species_entries)
+    candidate_pool = unique_candidates[:LLM_CANDIDATE_LIMIT]
+    if not candidate_pool:
+        return [], {
+            "selectionMethod": "heuristic",
+            "llmEnabled": llm_enabled(),
+            "llmModel": llm_model_name() if llm_enabled() else None,
+            "llmError": "No Flora candidates available for curation.",
+            "candidateCount": 0,
+            "candidatePoolCount": 0,
+            "curatedCount": 0,
+        }
+
+    llm_ids, llm_error = request_llm_selected_species_ids(
+        candidate_pool,
+        zip_code=zip_code,
+        state_code=state_code,
+        plant_type=plant_type,
+        plant_query=plant_query,
+    )
+    species_by_signature = {
+        species_signature(species): species for species in candidate_pool if species_signature(species)
+    }
+
+    curated_species: list[dict[str, Any]] = []
+    selected_signatures: set[str] = set()
+    if llm_ids:
+        for selected_id in llm_ids:
+            species = species_by_signature.get(selected_id)
+            if not species or selected_id in selected_signatures:
+                continue
+            selected_signatures.add(selected_id)
+            curated_species.append(species)
+            if len(curated_species) >= CURATED_RESULT_LIMIT:
+                break
+
+    selection_method = "llm" if curated_species else "heuristic"
+    if len(curated_species) < CURATED_RESULT_LIMIT:
+        curated_species.extend(
+            heuristic_select_species(
+                candidate_pool,
+                plant_type=plant_type,
+                desired_count=CURATED_RESULT_LIMIT - len(curated_species),
+                excluded_signatures=selected_signatures,
+            )
+        )
+
+    metadata = {
+        "selectionMethod": selection_method,
+        "llmEnabled": llm_enabled(),
+        "llmModel": llm_model_name() if llm_enabled() else None,
+        "llmError": llm_error if selection_method != "llm" else None,
+        "candidateCount": len(unique_candidates),
+        "candidatePoolCount": len(candidate_pool),
+        "curatedCount": len(curated_species),
+    }
+    return curated_species[:CURATED_RESULT_LIMIT], metadata
+
+
 def flora_species_to_plant(
     species: dict[str, Any], state_code: str, zone_hint: str, position: int
 ) -> dict[str, Any]:
@@ -646,19 +1023,24 @@ def flora_recommendations_for_zip(
     ranked_species, strict_match_count, filter_relaxed = prioritize_species_by_plant_type(
         species_entries, normalized_plant_type
     )
-    shuffled_species = list(ranked_species)
-    random.shuffle(shuffled_species)
+    curated_species, curation_metadata = curate_species_for_garden(
+        ranked_species,
+        zip_code=zip_code,
+        state_code=state_code,
+        plant_type=normalized_plant_type,
+        plant_query=normalized_plant_query,
+    )
 
     flora_plants: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    for position, species in enumerate(shuffled_species):
+    for position, species in enumerate(curated_species):
         mapped_plant = flora_species_to_plant(species, state_code=state_code, zone_hint=zone_hint, position=position)
         plant_id = mapped_plant["id"]
         if plant_id in seen_ids:
             continue
         seen_ids.add(plant_id)
         flora_plants.append(mapped_plant)
-        if len(flora_plants) >= 10:
+        if len(flora_plants) >= CURATED_RESULT_LIMIT:
             break
 
     climate_profile = {
@@ -673,6 +1055,13 @@ def flora_recommendations_for_zip(
         "strictMatchCount": strict_match_count,
         "filterRelaxed": filter_relaxed,
         "queryMetadata": query_metadata,
+        "selectionMethod": curation_metadata["selectionMethod"],
+        "candidateCount": curation_metadata["candidateCount"],
+        "candidatePoolCount": curation_metadata["candidatePoolCount"],
+        "curatedCount": curation_metadata["curatedCount"],
+        "llmEnabled": curation_metadata["llmEnabled"],
+        "llmModel": curation_metadata["llmModel"],
+        "llmError": curation_metadata["llmError"],
     }
     return climate_profile, flora_plants, filter_metadata
 
@@ -794,7 +1183,12 @@ def config() -> Any:
                 "flora": {
                     "enabled": flora_enabled(),
                     "baseUrl": FLORA_API_BASE_URL,
-                }
+                },
+                "llm": {
+                    "enabled": llm_enabled(),
+                    "provider": llm_provider(),
+                    "model": llm_model_name() if llm_enabled() else None,
+                },
             },
         }
     )
@@ -861,6 +1255,13 @@ def recommendations() -> Any:
                 "filterRelaxed": filter_metadata["filterRelaxed"],
                 "strictMatchCount": filter_metadata["strictMatchCount"],
                 "queryMetadata": filter_metadata.get("queryMetadata"),
+                "selectionMethod": filter_metadata.get("selectionMethod"),
+                "candidateCount": filter_metadata.get("candidateCount"),
+                "candidatePoolCount": filter_metadata.get("candidatePoolCount"),
+                "curatedCount": filter_metadata.get("curatedCount"),
+                "llmEnabled": filter_metadata.get("llmEnabled"),
+                "llmModel": filter_metadata.get("llmModel"),
+                "llmError": filter_metadata.get("llmError"),
             }
         )
 
@@ -939,6 +1340,13 @@ def recommendations_by_zip_code() -> Any:
             "filterRelaxed": filter_metadata["filterRelaxed"],
             "strictMatchCount": filter_metadata["strictMatchCount"],
             "queryMetadata": filter_metadata.get("queryMetadata"),
+            "selectionMethod": filter_metadata.get("selectionMethod"),
+            "candidateCount": filter_metadata.get("candidateCount"),
+            "candidatePoolCount": filter_metadata.get("candidatePoolCount"),
+            "curatedCount": filter_metadata.get("curatedCount"),
+            "llmEnabled": filter_metadata.get("llmEnabled"),
+            "llmModel": filter_metadata.get("llmModel"),
+            "llmError": filter_metadata.get("llmError"),
         }
     )
 
