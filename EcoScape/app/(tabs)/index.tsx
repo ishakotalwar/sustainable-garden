@@ -1318,9 +1318,9 @@ export default function HomeScreen() {
                 </View>
               </View>
             ))}
-
+            <Text style={styles.summaryTitle}>Garden Summary</Text>
             <View style={styles.summaryCard}>
-              <Text style={styles.summaryTitle}>Garden Summary</Text>
+              {/* <Text style={styles.summaryTitle}>Garden Summary</Text> */}
               {gardenSummary.totalPlaced === 0 ? (
                 <Text style={styles.summaryEmpty}>No plants placed yet.</Text>
               ) : (
@@ -1543,8 +1543,9 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
   metricFill: { height: 5, borderRadius: 3 },
   scoreFooter: { fontSize: 11, color: 'rgba(180,200,160,0.6)', textAlign: 'center', marginTop: 4 },
   dashboardFooter: { fontSize: 11, color: '#7d6a55', textAlign: 'center', marginTop: 6 },
-  summaryCard: { marginTop: 8, borderWidth: 1.5, borderColor: SOFT, borderRadius: 12, backgroundColor: '#f7f2e8', padding: 10, gap: 8 },
-  summaryTitle: { fontSize: 20, fontWeight: '800', color: BROWN },
+  // summaryCard: { marginTop: 8, borderWidth: 1.5, borderColor: SOFT, borderRadius: 12, backgroundColor: '#f7f2e8', padding: 10, gap: 8 },
+  summaryCard: { marginTop: -2,padding: 10, gap: 8 , marginLeft: -5},
+  summaryTitle: { fontSize: 22, fontWeight: '800', color: BROWN, marginTop: 23 },
   summaryMeta: { fontSize: 11, color: MID_BROWN, lineHeight: 15 },
   summaryList: { gap: 6 },
   summaryItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
