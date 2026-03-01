@@ -93,6 +93,7 @@ const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:5
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const MIN_CANVAS_SIZE = 220;
+const MAX_CANVAS_HEIGHT = Math.max(MIN_CANVAS_SIZE, Math.min(640, SCREEN_HEIGHT * 0.62));
 const DEFAULT_CANVAS_SIZE = Math.max(MIN_CANVAS_SIZE, Math.min(420, SCREEN_WIDTH - 28));
 
 const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
@@ -264,6 +265,7 @@ export default function HomeScreen() {
     placedPlants.map(p => `${p.plantId}:${Math.round(p.size)}`).join('|'), [placedPlants]);
   const selectedPlant = placedPlants.find(p => p.instanceId === selectedPlantId) ?? null;
   const selectedPlantDetails = selectedPlant ? plantsById[selectedPlant.plantId] : null;
+  const shouldShowCanvas = Boolean(canvasImageUri) || placedPlants.length > 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -389,8 +391,7 @@ export default function HomeScreen() {
       return;
     }
     const maxCanvasWidth = getMaxCanvasWidth();
-    const maxCanvasHeight = Math.max(MIN_CANVAS_SIZE, Math.min(640, SCREEN_HEIGHT * 0.62));
-    const scale = Math.min(1, maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
+    const scale = Math.min(1, maxCanvasWidth / sourceWidth, MAX_CANVAS_HEIGHT / sourceHeight);
 
     const width = Math.round(sourceWidth * scale);
     const height = Math.round(sourceHeight * scale);
@@ -414,6 +415,19 @@ export default function HomeScreen() {
       };
     });
   }, [getMaxCanvasWidth]);
+
+  useEffect(() => {
+    if (canvasImageUri || placedPlants.length > 0) {
+      return;
+    }
+    const expandedWidth = getMaxCanvasWidth();
+    setCanvasDimensions(current => {
+      if (current.width === expandedWidth && current.height === MAX_CANVAS_HEIGHT) {
+        return current;
+      }
+      return { width: expandedWidth, height: MAX_CANVAS_HEIGHT };
+    });
+  }, [canvasImageUri, placedPlants.length, getMaxCanvasWidth]);
 
   async function probeImageDimensions(uri: string): Promise<{ width: number; height: number } | null> {
     if (!uri) {
@@ -495,7 +509,7 @@ export default function HomeScreen() {
     setCanvasImageInput('');
     setCanvasImageMessage(null);
     setCanvasImageHasError(false);
-    setCanvasDimensions({ width: DEFAULT_CANVAS_SIZE, height: DEFAULT_CANVAS_SIZE });
+    setCanvasDimensions({ width: getMaxCanvasWidth(), height: MAX_CANVAS_HEIGHT });
   }
 
   async function lookupZipRecommendations() {
@@ -583,7 +597,6 @@ export default function HomeScreen() {
             </Pressable>
           </View>
         </View>
-        <Text style={styles.hint}>Left: add plants. Center: arrange on canvas. Right: sustainability dashboard updates live.</Text>
 
         <View style={styles.workspaceRow}>
           <View style={[styles.workspacePanel, styles.workspacePlantsPanel]}>
@@ -629,7 +642,7 @@ export default function HomeScreen() {
 
           <View style={[styles.workspacePanel, styles.workspaceCanvasPanel]}>
             <View style={styles.imageBlock}>
-              <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}>(optional)</Text></Text>
+              <Text style={styles.fieldLabel}>Backyard Photo  <Text style={styles.fieldLabelMuted}></Text></Text>
               <TextInput
                 value={canvasImageInput}
                 onChangeText={setCanvasImageInput}
@@ -654,53 +667,54 @@ export default function HomeScreen() {
                 const measuredWidth = Math.max(1, Math.round(event.nativeEvent.layout.width));
                 setCanvasShellWidth(previous => (previous === measuredWidth ? previous : measuredWidth));
               }}>
-              <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
-                {canvasImageUri ? (
-                  <>
-                    <Image
-                      source={{ uri: canvasImageUri }}
-                      style={StyleSheet.absoluteFillObject}
-                      resizeMode="cover"
-                      onLoad={(event) => {
-                        const source = event.nativeEvent?.source;
-                        const sourceWidth = Number(source?.width);
-                        const sourceHeight = Number(source?.height);
-                        if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
-                          fitCanvasToImage(sourceWidth, sourceHeight);
-                        }
-                        setCanvasImageMessage('Image loaded.');
-                        setCanvasImageHasError(false);
-                      }}
-                      onError={() => {
-                        setCanvasImageMessage('Could not load image. Check the URL.');
-                        setCanvasImageHasError(true);
-                      }}
-                    />
-                    <View pointerEvents="none" style={styles.canvasOverlay} />
-                  </>
-                ) : null}
+              {shouldShowCanvas ? (
+                <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
+                  {canvasImageUri ? (
+                    <>
+                      <Image
+                        source={{ uri: canvasImageUri }}
+                        style={StyleSheet.absoluteFillObject}
+                        resizeMode="cover"
+                        onLoad={(event) => {
+                          const source = event.nativeEvent?.source;
+                          const sourceWidth = Number(source?.width);
+                          const sourceHeight = Number(source?.height);
+                          if (Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && sourceWidth > 0 && sourceHeight > 0) {
+                            fitCanvasToImage(sourceWidth, sourceHeight);
+                          }
+                          setCanvasImageHasError(false);
+                        }}
+                        onError={() => {
+                          setCanvasImageMessage('Could not load image. Check the URL.');
+                          setCanvasImageHasError(true);
+                        }}
+                      />
+                      <View pointerEvents="none" style={styles.canvasOverlay} />
+                    </>
+                  ) : null}
 
-                {placedPlants.map(item => {
-                  const plant = plantsById[item.plantId];
-                  if (!plant) return null;
-                  return (
-                    <DraggablePlant
-                      key={item.instanceId}
-                      item={item}
-                      plant={plant}
-                      selected={selectedPlantId === item.instanceId}
-                      canvasWidth={canvasWidth}
-                      canvasHeight={canvasHeight}
-                      onMove={movePlant}
-                      onSelect={setSelectedPlantId}
-                    />
-                  );
-                })}
-                {placedPlants.length === 0 && (
-                  <View style={styles.canvasEmpty}>
-                  </View>
-                )}
-              </View>
+                  {placedPlants.map(item => {
+                    const plant = plantsById[item.plantId];
+                    if (!plant) return null;
+                    return (
+                      <DraggablePlant
+                        key={item.instanceId}
+                        item={item}
+                        plant={plant}
+                        selected={selectedPlantId === item.instanceId}
+                        canvasWidth={canvasWidth}
+                        canvasHeight={canvasHeight}
+                        onMove={movePlant}
+                        onSelect={setSelectedPlantId}
+                      />
+                    );
+                  })}
+                </View>
+              ) : (
+                <View style={[styles.canvasPrompt, { width: getMaxCanvasWidth(), height: MAX_CANVAS_HEIGHT }]}>
+                  <Text style={styles.canvasEmptyText}>Upload a backyard image to start your layout.</Text>
+                </View>
+              )}
             </View>
 
             {selectedPlant && selectedPlantDetails ? (
@@ -869,6 +883,7 @@ getStartedText: {
   canvasShell: { borderRadius: 16, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#f5f0e8', alignItems: 'center', padding: 8 },
   canvas: { position: 'relative', borderWidth: 2, borderColor: '#c4b498', borderRadius: 10, backgroundColor: '#fdfaf4', overflow: 'hidden' },
   canvasOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(10, 18, 6, 0.22)' },
+  canvasPrompt: { width: '100%', minHeight: 96, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
   gridV: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: '#ede4d4' },
   gridH: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#ede4d4' },
   canvasEmpty: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', gap: 6 },

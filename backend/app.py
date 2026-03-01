@@ -37,6 +37,17 @@ def load_env_file(env_path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw.strip())
+    except ValueError:
+        return default
+    return max(minimum, parsed)
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_env_file(PROJECT_ROOT / ".env")
 
@@ -52,9 +63,18 @@ OPENROUTER_X_TITLE = os.getenv("OPENROUTER_X_TITLE", os.getenv("APP_NAME", "EcoS
 OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+FLORA_DEBUG_LOG_RECOMMENDATIONS = os.getenv("FLORA_DEBUG_LOG_RECOMMENDATIONS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
-MAX_SPECIES_BUFFER = 260
-LLM_CANDIDATE_LIMIT = 120
+FLORA_PAGE_LIMIT = env_int("FLORA_PAGE_LIMIT", 80)
+FLORA_MAX_PAGES = env_int("FLORA_MAX_PAGES", 40)
+FLORA_MAX_REQUESTS_PER_QUERY = env_int("FLORA_MAX_REQUESTS_PER_QUERY", 12)
+MAX_SPECIES_BUFFER = env_int("FLORA_MAX_SPECIES_BUFFER", 5000)
+LLM_CANDIDATE_LIMIT = env_int("LLM_CANDIDATE_LIMIT", 120)
 CURATED_RESULT_LIMIT = 10
 
 DEFAULT_CLIMATE_PROFILE: dict[str, str] = {
@@ -217,6 +237,48 @@ def species_signature(species: dict[str, Any]) -> str:
     return str(raw_identifier).strip().lower().replace(" ", "-")
 
 
+def species_display_name(species: dict[str, Any]) -> str:
+    common_name = str(species.get("common_name") or "").strip()
+    scientific_name = str(species.get("scientific_name") or "").strip()
+    if common_name and scientific_name and common_name.lower() != scientific_name.lower():
+        return f"{common_name} ({scientific_name})"
+    if common_name:
+        return common_name
+    if scientific_name:
+        return scientific_name
+    return species_signature(species) or "Unknown Species"
+
+
+def debug_print_flora_recommendations(
+    zip_code: str,
+    state_code: str,
+    ranked_species: list[dict[str, Any]],
+    curated_species: list[dict[str, Any]],
+) -> None:
+    if not (FLORA_DEBUG_LOG_RECOMMENDATIONS or app.debug):
+        return
+
+    print(
+        f"[Flora Debug] ZIP {zip_code} | state={state_code} | total-ranked-candidates={len(ranked_species)}",
+        flush=True,
+    )
+    for index, species in enumerate(ranked_species, start=1):
+        print(
+            f"[Flora Debug]   {index:03d}. {species_display_name(species)} | id={species_signature(species)}",
+            flush=True,
+        )
+
+    print(
+        f"[Flora Debug] ZIP {zip_code} | curated-top-{len(curated_species)}",
+        flush=True,
+    )
+    for index, species in enumerate(curated_species, start=1):
+        print(
+            f"[Flora Debug]   TOP {index:02d}. {species_display_name(species)} | id={species_signature(species)}",
+            flush=True,
+        )
+
+
 def normalize_zip_code(raw_zip: str | None) -> str | None:
     if not raw_zip:
         return None
@@ -260,6 +322,197 @@ def normalize_plant_query(raw_plant_query: str | None) -> str | None:
     return normalized[:80]
 
 
+def evenly_spaced_ints(start: int, end: int, count: int) -> list[int]:
+    if count <= 0:
+        return []
+    if end < start:
+        end = start
+    if count == 1:
+        return [start]
+
+    values: list[int] = []
+    for idx in range(count):
+        ratio = idx / (count - 1)
+        value = int(round(start + (end - start) * ratio))
+        if values and values[-1] == value:
+            continue
+        values.append(value)
+    return values
+
+
+def extract_total_count(payload: Any) -> int | None:
+    keys = (
+        "total",
+        "total_count",
+        "totalCount",
+        "total_results",
+        "totalResults",
+        "num_results",
+        "numResults",
+    )
+    if isinstance(payload, dict):
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.isdigit():
+                    parsed = int(stripped)
+                    if parsed > 0:
+                        return parsed
+        for value in payload.values():
+            extracted = extract_total_count(value)
+            if extracted is not None:
+                return extracted
+    if isinstance(payload, list):
+        for item in payload:
+            extracted = extract_total_count(item)
+            if extracted is not None:
+                return extracted
+    return None
+
+
+def fetch_species_entries_paginated(
+    path: str,
+    params: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    base_params = dict(params)
+    raw_limit = base_params.get("limit")
+    try:
+        requested_limit = int(raw_limit) if raw_limit is not None else FLORA_PAGE_LIMIT
+    except (ValueError, TypeError):
+        requested_limit = FLORA_PAGE_LIMIT
+    per_page_limit = max(1, min(requested_limit, FLORA_PAGE_LIMIT))
+    base_params["limit"] = per_page_limit
+
+    combined: list[dict[str, Any]] = []
+    seen_signatures: set[str] = set()
+    pages_fetched = 0
+    requests_made = 0
+    pagination_mode = "single"
+    rate_limited = False
+    stopped_early = False
+    stop_reason = ""
+
+    def request_budget_exhausted() -> bool:
+        return requests_made >= FLORA_MAX_REQUESTS_PER_QUERY
+
+    def add_entries(species_entries: list[dict[str, Any]]) -> int:
+        added = 0
+        for species in species_entries:
+            signature = species_signature(species)
+            if not signature or signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            combined.append(species)
+            added += 1
+            if len(combined) >= MAX_SPECIES_BUFFER:
+                break
+        return added
+
+    first_payload = flora_get(path, params=base_params)
+    requests_made += 1
+    first_entries = extract_species_list(first_payload)
+    pages_fetched = 1
+    add_entries(first_entries)
+    total_count = extract_total_count(first_payload)
+    remaining_request_budget = max(0, min(FLORA_MAX_PAGES - 1, FLORA_MAX_REQUESTS_PER_QUERY - 1))
+
+    if len(combined) < MAX_SPECIES_BUFFER and first_entries and remaining_request_budget > 0:
+        pagination_mode = "page"
+        if total_count and total_count > per_page_limit:
+            estimated_pages = max(2, (total_count + per_page_limit - 1) // per_page_limit)
+            page_numbers = evenly_spaced_ints(2, estimated_pages, remaining_request_budget)
+        else:
+            page_numbers = list(range(2, 2 + remaining_request_budget))
+
+        page_mode_new_entries = 0
+        for page in page_numbers:
+            if request_budget_exhausted():
+                stopped_early = True
+                stop_reason = "request-budget-reached"
+                break
+            try:
+                payload = flora_get(path, params={**base_params, "page": page})
+            except requests.RequestException as exc:
+                status_code = exc.response.status_code if getattr(exc, "response", None) is not None else None
+                if status_code == 429:
+                    rate_limited = True
+                    stopped_early = True
+                    stop_reason = "rate-limited-on-page"
+                    break
+                raise
+            requests_made += 1
+            entries = extract_species_list(payload)
+            pages_fetched += 1
+            if not entries:
+                break
+            new_entries = add_entries(entries)
+            page_mode_new_entries += new_entries
+            if len(combined) >= MAX_SPECIES_BUFFER:
+                break
+            if new_entries == 0:
+                break
+
+        if page_mode_new_entries == 0 and not request_budget_exhausted():
+            pagination_mode = "offset"
+            combined = []
+            seen_signatures = set()
+            add_entries(first_entries)
+            pages_fetched = 1
+
+            if total_count and total_count > per_page_limit:
+                max_offset = max(per_page_limit, total_count - per_page_limit)
+            else:
+                # If the API does not expose total count, probe deeper offsets to reduce first-page bias.
+                max_offset = per_page_limit * max(2, remaining_request_budget * 4)
+
+            offset_values = evenly_spaced_ints(per_page_limit, max_offset, remaining_request_budget)
+            for offset_value in offset_values:
+                if request_budget_exhausted():
+                    stopped_early = True
+                    if not stop_reason:
+                        stop_reason = "request-budget-reached"
+                    break
+                try:
+                    payload = flora_get(path, params={**base_params, "offset": offset_value})
+                except requests.RequestException as exc:
+                    status_code = exc.response.status_code if getattr(exc, "response", None) is not None else None
+                    if status_code == 429:
+                        rate_limited = True
+                        stopped_early = True
+                        stop_reason = "rate-limited-on-offset"
+                        break
+                    raise
+                requests_made += 1
+                entries = extract_species_list(payload)
+                pages_fetched += 1
+                if not entries:
+                    break
+                new_entries = add_entries(entries)
+                if len(combined) >= MAX_SPECIES_BUFFER:
+                    break
+                if new_entries == 0:
+                    break
+
+    metadata = {
+        "paginationMode": pagination_mode,
+        "pagesFetched": pages_fetched,
+        "requestsMade": requests_made,
+        "maxRequestsPerQuery": FLORA_MAX_REQUESTS_PER_QUERY,
+        "perPageLimit": per_page_limit,
+        "resultCount": len(combined),
+        "firstPageCount": len(first_entries),
+        "estimatedTotalCount": total_count,
+        "truncatedByMaxBuffer": len(combined) >= MAX_SPECIES_BUFFER,
+        "rateLimited": rate_limited,
+        "stoppedEarly": stopped_early,
+        "stopReason": stop_reason or None,
+    }
+    return combined, metadata
+
+
 def fetch_species_entries_from_candidates(
     candidates: list[tuple[str, dict[str, Any]]], strategy: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -271,14 +524,14 @@ def fetch_species_entries_from_candidates(
 
     for path, params in candidates:
         try:
-            payload = flora_get(path, params=params)
-            species_entries = extract_species_list(payload)
+            species_entries, pagination = fetch_species_entries_paginated(path, params=params)
             successful_calls += 1
             attempted.append(
                 {
                     "path": path,
                     "params": params,
                     "resultCount": len(species_entries),
+                    "pagination": pagination,
                 }
             )
             for species in species_entries:
@@ -291,6 +544,8 @@ def fetch_species_entries_from_candidates(
                 collected.append(species)
                 if len(collected) >= MAX_SPECIES_BUFFER:
                     break
+            if len(collected) >= MAX_SPECIES_BUFFER:
+                break
         except requests.RequestException as exc:
             last_error = exc
             attempted.append(
@@ -315,7 +570,7 @@ def fetch_species_entries_from_candidates(
 
 
 def flora_type_search_candidates(state_code: str, plant_type: str | None) -> list[tuple[str, dict[str, Any]]]:
-    base_params = {"state": state_code, "native_only": True, "limit": 80}
+    base_params = {"state": state_code, "native_only": True, "limit": FLORA_PAGE_LIMIT}
     if not plant_type:
         return [("/v1/search", base_params)]
 
@@ -354,7 +609,7 @@ def fetch_species_entries_for_type(
 def flora_query_search_candidates(
     state_code: str, plant_query: str, plant_type: str | None
 ) -> list[tuple[str, dict[str, Any]]]:
-    base = {"q": plant_query, "limit": 80}
+    base = {"q": plant_query, "limit": FLORA_PAGE_LIMIT}
     option = PLANT_TYPE_OPTIONS.get(plant_type) if plant_type else None
     flora_habit = option.get("flora_habit") if option else None
 
@@ -873,6 +1128,30 @@ def heuristic_select_species(
     return [item[2] for item in scored[:desired_count]]
 
 
+def build_llm_candidate_pool(
+    species_entries: list[dict[str, Any]],
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    if max_candidates <= 0 or not species_entries:
+        return []
+    if len(species_entries) <= max_candidates:
+        return species_entries
+
+    # Spread picks across the full list so the LLM sees candidates from later pages too.
+    pool: list[dict[str, Any]] = []
+    used_indices: set[int] = set()
+    total = len(species_entries)
+    for slot in range(max_candidates):
+        index = min(total - 1, int(slot * total / max_candidates))
+        while index in used_indices and index < total - 1:
+            index += 1
+        if index in used_indices:
+            continue
+        used_indices.add(index)
+        pool.append(species_entries[index])
+    return pool
+
+
 def curate_species_for_garden(
     species_entries: list[dict[str, Any]],
     zip_code: str,
@@ -881,8 +1160,8 @@ def curate_species_for_garden(
     plant_query: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     unique_candidates = unique_species_entries(species_entries)
-    candidate_pool = unique_candidates[:LLM_CANDIDATE_LIMIT]
-    if not candidate_pool:
+    llm_candidate_pool = build_llm_candidate_pool(unique_candidates, LLM_CANDIDATE_LIMIT)
+    if not unique_candidates:
         return [], {
             "selectionMethod": "heuristic",
             "llmEnabled": llm_enabled(),
@@ -894,14 +1173,14 @@ def curate_species_for_garden(
         }
 
     llm_ids, llm_error = request_llm_selected_species_ids(
-        candidate_pool,
+        llm_candidate_pool,
         zip_code=zip_code,
         state_code=state_code,
         plant_type=plant_type,
         plant_query=plant_query,
     )
     species_by_signature = {
-        species_signature(species): species for species in candidate_pool if species_signature(species)
+        species_signature(species): species for species in unique_candidates if species_signature(species)
     }
 
     curated_species: list[dict[str, Any]] = []
@@ -920,7 +1199,7 @@ def curate_species_for_garden(
     if len(curated_species) < CURATED_RESULT_LIMIT:
         curated_species.extend(
             heuristic_select_species(
-                candidate_pool,
+                unique_candidates,
                 plant_type=plant_type,
                 desired_count=CURATED_RESULT_LIMIT - len(curated_species),
                 excluded_signatures=selected_signatures,
@@ -933,7 +1212,7 @@ def curate_species_for_garden(
         "llmModel": llm_model_name() if llm_enabled() else None,
         "llmError": llm_error if selection_method != "llm" else None,
         "candidateCount": len(unique_candidates),
-        "candidatePoolCount": len(candidate_pool),
+        "candidatePoolCount": len(llm_candidate_pool),
         "curatedCount": len(curated_species),
     }
     return curated_species[:CURATED_RESULT_LIMIT], metadata
@@ -1029,6 +1308,12 @@ def flora_recommendations_for_zip(
         state_code=state_code,
         plant_type=normalized_plant_type,
         plant_query=normalized_plant_query,
+    )
+    debug_print_flora_recommendations(
+        zip_code=zip_code,
+        state_code=state_code,
+        ranked_species=ranked_species,
+        curated_species=curated_species,
     )
 
     flora_plants: list[dict[str, Any]] = []
