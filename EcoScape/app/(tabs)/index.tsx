@@ -12,6 +12,81 @@ import {
   View,
 } from 'react-native';
 
+const imageCache = new Map<string, string | null>();
+
+function usePlantImage(plant: Plant): string | null {
+  const [imageUri, setImageUri] = useState<string | null>(
+    imageCache.has(plant.name) ? imageCache.get(plant.name) ?? null : null
+  );
+
+  useEffect(() => {
+    if (imageCache.has(plant.name)) {
+      setImageUri(imageCache.get(plant.name) ?? null);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function tryDirectSummary(name: string): Promise<string | null> {
+      try {
+        const res = await fetch(
+          `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(name)}`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data?.originalimage?.source ?? data?.thumbnail?.source ?? null;
+      } catch { return null; }
+    }
+
+    async function trySearchThenSummary(query: string): Promise<string | null> {
+      try {
+        // Use Wikipedia's opensearch to find the best matching article title
+        const searchRes = await fetch(
+          `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=3&format=json&origin=*`
+        );
+        if (!searchRes.ok) return null;
+        const [, titles] = await searchRes.json() as [string, string[]];
+        if (!titles?.length) return null;
+
+        // Try each result until we get one with an image
+        for (const title of titles) {
+          const img = await tryDirectSummary(title);
+          if (img) return img;
+        }
+        return null;
+      } catch { return null; }
+    }
+
+    async function fetchImage() {
+      let uri: string | null = null;
+
+      // Strategy 1: direct lookup by exact plant name
+      uri = await tryDirectSummary(plant.name);
+      if (cancelled) return;
+
+      // Strategy 2: search Wikipedia with plant name
+      if (!uri) {
+        uri = await trySearchThenSummary(plant.name);
+        if (cancelled) return;
+      }
+
+      // Strategy 3: append "plant" to disambiguate (e.g. "Sage plant")
+      if (!uri) {
+        uri = await trySearchThenSummary(`${plant.name} plant`);
+        if (cancelled) return;
+      }
+
+      imageCache.set(plant.name, uri);
+      setImageUri(uri);
+    }
+
+    fetchImage();
+    return () => { cancelled = true; };
+  }, [plant.name]);
+
+  return imageUri;
+}
 type Rating = 'Low' | 'Medium' | 'High';
 type Region = string;
 
@@ -238,6 +313,7 @@ function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMo
   const canvasRef = useRef({ width: canvasWidth, height: canvasHeight });
   const dragState = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const viewRef = useRef<any>(null);
+  const imageUri = usePlantImage(plant);
 
   useEffect(() => { sizeRef.current = item.size; }, [item.size]);
   useEffect(() => { canvasRef.current = { width: canvasWidth, height: canvasHeight }; }, [canvasWidth, canvasHeight]);
@@ -313,18 +389,70 @@ function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMo
     });
   }, [item.instanceId, item.x, item.y, onMove, onSelect]);
 
-  return (
-    <View
-      ref={viewRef}
-      {...panResponder.panHandlers}
-      style={[
-        styles.placedPlant,
-        selected && styles.placedPlantSelected,
-        { left: item.x, top: item.y, width: item.size, height: item.size },
-      ]}
-    >
-      <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
-    </View>
+//   return (
+//     <View
+//       ref={viewRef}
+//       {...panResponder.panHandlers}
+//       style={[
+//         styles.placedPlant,
+//         selected && styles.placedPlantSelected,
+//         { left: item.x, top: item.y, width: item.size, height: item.size },
+//       ]}
+//     >
+//       <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
+//     </View>
+//   );
+// }
+    const webStyle = Platform.OS === 'web'
+    ? ({ cursor: selected ? 'grabbing' : 'grab' } as any)
+    : undefined;
+
+    return (
+      <View
+        ref={viewRef}
+        {...panResponder.panHandlers}
+        style={[
+          styles.placedPlant,
+          selected && styles.placedPlantSelected,
+          { left: item.x, top: item.y, width: item.size, height: item.size },
+          webStyle,
+        ]}
+      >
+        {imageUri ? (
+          // Real plant photo from Wikipedia
+          <Image
+            source={{ uri: imageUri }}
+            style={{
+              width: '100%',
+              height: '100%',
+              borderRadius: 999,
+            }}
+            resizeMode="cover"
+          />
+        ) : (
+          // Emoji fallback while loading or if not found
+          <Text style={{ fontSize: item.size * 0.42 }}>{plant.emoji}</Text>
+        )}
+        
+        {/* Small emoji badge so you still know what plant it is */}
+        {imageUri && (
+          <View style={{
+            position: 'absolute',
+            bottom: -2,
+            right: -2,
+            backgroundColor: 'rgba(255,255,255,0.9)',
+            borderRadius: 999,
+            width: item.size * 0.35,
+            height: item.size * 0.35,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderWidth: 1,
+            borderColor: 'rgba(0,0,0,0.1)',
+          }}>
+            <Text style={{ fontSize: item.size * 0.2 }}>{plant.emoji}</Text>
+          </View>
+        )}
+      </View>
   );
 }
 export default function HomeScreen() {
