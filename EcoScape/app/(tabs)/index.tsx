@@ -46,14 +46,32 @@ async function fetchWikiImage(name: string): Promise<string | null> {
   } catch { return null; }
 }
 
-function usePlantImage(plant: Plant): string | null {
+async function removeBackgroundViaBackend(imageUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/images/remove-background`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageUrl }),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json() as { imageDataUrl?: string };
+    const dataUrl = payload.imageDataUrl;
+    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/png;base64,')) {
+      return dataUrl;
+    }
+    return null;
+  } catch { return null; }
+}
+
+function usePlantImage(plant: Plant, removeBackground: boolean): string | null {
+  const cacheKey = `${plant.name}::${removeBackground ? 'nobg' : 'orig'}`;
   const [imageUri, setImageUri] = useState<string | null>(
-    imageCache.has(plant.name) ? imageCache.get(plant.name) ?? null : null
+    imageCache.has(cacheKey) ? imageCache.get(cacheKey) ?? null : null
   );
 
   useEffect(() => {
-    if (imageCache.has(plant.name)) {
-      setImageUri(imageCache.get(plant.name) ?? null);
+    if (imageCache.has(cacheKey)) {
+      setImageUri(imageCache.get(cacheKey) ?? null);
       return;
     }
 
@@ -69,13 +87,19 @@ function usePlantImage(plant: Plant): string | null {
         if (cancelled) return;
       }
 
-      imageCache.set(plant.name, uri);
+      if (uri && removeBackground) {
+        const transparentPng = await removeBackgroundViaBackend(uri);
+        if (cancelled) return;
+        if (transparentPng) uri = transparentPng;
+      }
+
+      imageCache.set(cacheKey, uri);
       setImageUri(uri);
     }
 
     fetchImage();
     return () => { cancelled = true; };
-  }, [plant.name]);
+  }, [cacheKey, plant.name, removeBackground]);
 
   return imageUri;
 }
@@ -168,6 +192,7 @@ type Plant = {
   id: string;
   name: string;
   emoji: string;
+  isFlower?: boolean;
   zones: string[];
   nativeRegions: Region[];
   waterUsage: Rating;
@@ -376,7 +401,7 @@ type DraggablePlantProps = {
 };
 
 function PlantCardImage({ plant }: { plant: Plant }) {
-  const imageUri = usePlantImage(plant);
+  const imageUri = usePlantImage(plant, false);
   if (imageUri) {
     return (
       <Image
@@ -395,7 +420,7 @@ function DraggablePlant({ item, plant, selected, canvasWidth, canvasHeight, onMo
   const canvasRef = useRef({ width: canvasWidth, height: canvasHeight });
   const dragState = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const viewRef = useRef<any>(null);
-  const imageUri = usePlantImage(plant);
+  const imageUri = usePlantImage(plant, true);
 
   useEffect(() => { sizeRef.current = item.size; }, [item.size]);
   useEffect(() => { canvasRef.current = { width: canvasWidth, height: canvasHeight }; }, [canvasWidth, canvasHeight]);
@@ -1026,6 +1051,7 @@ export default function HomeScreen() {
                       <View pointerEvents="none" style={styles.canvasOverlay} />
                     </>
                   ) : null}
+                  <Pressable style={styles.canvasTapLayer} onPress={() => setSelectedPlantId(null)} />
 
                   {placedPlants.map(item => {
                     const plant = plantsById[item.plantId];
@@ -1216,6 +1242,7 @@ getStartedText: {
   canvasShell: { borderRadius: 16, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#f5f0e8', alignItems: 'center', padding: 8 },
   canvas: { position: 'relative', borderWidth: 2, borderColor: '#c4b498', borderRadius: 10, backgroundColor: '#fdfaf4', overflow: 'hidden' },
   canvasOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(10, 18, 6, 0.22)' },
+  canvasTapLayer: { ...StyleSheet.absoluteFillObject, zIndex: 1 },
   canvasPrompt: { width: '100%', minHeight: 96, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
   gridV: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: '#ede4d4' },
   gridH: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: '#ede4d4' },

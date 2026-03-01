@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -75,6 +76,10 @@ FLORA_PAGE_LIMIT = env_int("FLORA_PAGE_LIMIT", 80)
 FLORA_MAX_PAGES = env_int("FLORA_MAX_PAGES", 40)
 FLORA_MAX_REQUESTS_PER_QUERY = env_int("FLORA_MAX_REQUESTS_PER_QUERY", 12)
 FLORA_DEFAULT_BUCKET_QUERIES = min(26, env_int("FLORA_DEFAULT_BUCKET_QUERIES", 12))
+REMOVE_BG_API_BASE_URL = os.getenv("REMOVE_BG_API_BASE_URL", "https://api.remove.bg/v1.0/removebg").strip()
+REMOVE_BG_API_KEY = os.getenv("REMOVE_BG_API_KEY", "").strip()
+REMOVE_BG_SIZE = os.getenv("REMOVE_BG_SIZE", "preview").strip() or "preview"
+REMOVE_BG_TIMEOUT_SECONDS = env_int("REMOVE_BG_TIMEOUT_SECONDS", 30, minimum=5)
 MAX_SPECIES_BUFFER = env_int("FLORA_MAX_SPECIES_BUFFER", 5000)
 LLM_CANDIDATE_LIMIT = env_int("LLM_CANDIDATE_LIMIT", 120)
 CURATED_RESULT_LIMIT = 10
@@ -95,6 +100,7 @@ DYNAMIC_CLIMATE_PROFILES: dict[str, dict[str, str]] = {}
 PLANT_RATING_CACHE: dict[str, dict[str, str]] = {}
 PLANT_RATING_FAILED_KEYS: set[str] = set()
 SPECIES_DETAILS_CACHE: dict[str, dict[str, Any] | None] = {}
+REMOVE_BG_IMAGE_CACHE: dict[str, str | None] = {}
 
 WATER_EFFICIENCY_POINTS = {"Low": 100, "Medium": 70, "High": 35}
 RATING_POINTS = {"Low": 40, "Medium": 70, "High": 100}
@@ -178,6 +184,45 @@ def flora_get(path: str, params: dict[str, Any] | None = None) -> Any:
     )
     response.raise_for_status()
     return response.json()
+
+
+def remove_bg_enabled() -> bool:
+    return bool(REMOVE_BG_API_KEY)
+
+
+def remove_background_from_image_url(image_url: str) -> str | None:
+    cleaned_url = image_url.strip()
+    if not cleaned_url:
+        return None
+    if cleaned_url in REMOVE_BG_IMAGE_CACHE:
+        return REMOVE_BG_IMAGE_CACHE[cleaned_url]
+    if not remove_bg_enabled():
+        REMOVE_BG_IMAGE_CACHE[cleaned_url] = None
+        return None
+
+    try:
+        response = requests.post(
+            REMOVE_BG_API_BASE_URL,
+            headers={"X-Api-Key": REMOVE_BG_API_KEY},
+            data={
+                "image_url": cleaned_url,
+                "size": REMOVE_BG_SIZE,
+                "format": "png",
+            },
+            timeout=REMOVE_BG_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException:
+        REMOVE_BG_IMAGE_CACHE[cleaned_url] = None
+        return None
+
+    if response.status_code != 200:
+        REMOVE_BG_IMAGE_CACHE[cleaned_url] = None
+        return None
+
+    encoded_png = base64.b64encode(response.content).decode("ascii")
+    data_url = f"data:image/png;base64,{encoded_png}"
+    REMOVE_BG_IMAGE_CACHE[cleaned_url] = data_url
+    return data_url
 
 
 def llm_enabled() -> bool:
@@ -1501,6 +1546,7 @@ def flora_species_to_plant(
     pollinator_value = normalize_rating(pollinator_source, default="Medium")
     carbon_value = normalize_rating(carbon_source, default="Medium")
     drought_value = normalize_rating(drought_source, default="Medium")
+    is_flower = species_strict_match(species, "flower")
 
     llm_ratings = llm_rate_species(species)
     if llm_ratings:
@@ -1513,6 +1559,7 @@ def flora_species_to_plant(
         "id": plant_id,
         "name": display_name,
         "emoji": flora_emoji_for_species(species),
+        "isFlower": is_flower,
         "zones": parse_zones(species, zone_hint),
         "nativeRegions": ["native"] if is_native else [],
         "waterUsage": water_usage,
@@ -1727,7 +1774,32 @@ def config() -> Any:
                     "provider": llm_provider(),
                     "model": llm_model_name() if llm_enabled() else None,
                 },
+                "removeBg": {
+                    "enabled": remove_bg_enabled(),
+                },
             },
+        }
+    )
+
+
+@app.post("/api/images/remove-background")
+def remove_background() -> Any:
+    payload = request.get_json(silent=True) or {}
+    image_url = payload.get("imageUrl") or payload.get("image_url")
+    if not isinstance(image_url, str) or not image_url.strip():
+        return jsonify({"error": "imageUrl is required."}), 400
+
+    if not remove_bg_enabled():
+        return jsonify({"error": "REMOVE_BG_API_KEY not configured on backend.", "removeBgEnabled": False}), 503
+
+    removed_background_data_url = remove_background_from_image_url(image_url)
+    if not removed_background_data_url:
+        return jsonify({"error": "remove.bg request failed.", "removeBgEnabled": True}), 502
+
+    return jsonify(
+        {
+            "imageDataUrl": removed_background_data_url,
+            "removeBgEnabled": True,
         }
     )
 
