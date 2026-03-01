@@ -13,29 +13,6 @@ import {
 } from 'react-native';
 const imageCache = new Map<string, string | null>();
 
-function looksLikeTreeName(name: string): boolean {
-  return /\b(tree|oak|pine|maple|redwood|cedar|spruce|fir|palm)\b/i.test(name);
-}
-
-function isTreePlant(plant: Plant): boolean {
-  return plant.emoji === '🌳' || looksLikeTreeName(plant.name);
-}
-
-function treeImageScore(text: string): number {
-  const normalized = text.toLowerCase();
-  let score = 0;
-  const positive = ['tree', 'habit', 'whole', 'full', 'mature', 'standing'];
-  const negative = ['branch', 'leaf', 'bark', 'flower', 'blossom', 'fruit', 'twig', 'closeup', 'close-up'];
-
-  for (const token of positive) {
-    if (normalized.includes(token)) score += 2;
-  }
-  for (const token of negative) {
-    if (normalized.includes(token)) score -= 3;
-  }
-  return score;
-}
-
 async function fetchInatImage(query: string): Promise<string | null> {
   try {
     const res = await fetch(
@@ -51,75 +28,19 @@ async function fetchInatImage(query: string): Promise<string | null> {
   } catch { return null; }
 }
 
-async function fetchWikimediaCommonsTreeImage(name: string): Promise<string | null> {
+async function fetchWikiImage(name: string): Promise<string | null> {
   try {
-    const queries = [`${name} tree`, `${name} habit`, `${name} full tree`];
-    for (const query of queries) {
-      const searchRes = await fetch(
-        `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrlimit=12&prop=imageinfo&iiprop=url|size&format=json&origin=*&gsrsearch=${encodeURIComponent(`${query} filetype:bitmap`)}`,
-      );
-      if (!searchRes.ok) continue;
-      const data = await searchRes.json() as {
-        query?: {
-          pages?: Record<string, {
-            title?: string;
-            imageinfo?: Array<{ url?: string; width?: number; height?: number }>;
-          }>;
-        };
-      };
-
-      const pages = Object.values(data?.query?.pages ?? {});
-      let bestUrl: string | null = null;
-      let bestScore = Number.NEGATIVE_INFINITY;
-      for (const page of pages) {
-        const info = page.imageinfo?.[0];
-        const url = info?.url;
-        if (!url) continue;
-
-        const width = Number(info?.width ?? 0);
-        const height = Number(info?.height ?? 0);
-        if (width < 300 || height < 300) continue;
-
-        const ratio = width > 0 ? height / width : 1;
-        const sizeBonus = Math.min(2, Math.log10(Math.max(width, height) / 1000 + 1));
-        const ratioBonus = ratio > 0.85 ? 1.2 : 0.4;
-        const score = treeImageScore(`${page.title ?? ''} ${url}`) + sizeBonus + ratioBonus;
-        if (score > bestScore) {
-          bestScore = score;
-          bestUrl = url;
-        }
-      }
-
-      if (bestUrl) return bestUrl;
-    }
-    return null;
-  } catch { return null; }
-}
-
-async function fetchWikiImage(name: string, preferWholeTree = false): Promise<string | null> {
-  try {
-    const searchTerms = preferWholeTree
-      ? [`${name} tree`, `${name} habit`, name]
-      : [name, `${name} plant`];
-    for (const term of searchTerms) {
-      const searchRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(term)}&limit=3&format=json&origin=*`,
-      );
-      if (!searchRes.ok) continue;
-      const [, titles] = await searchRes.json() as [string, string[]];
-      for (const title of titles ?? []) {
-        const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
-        if (!res.ok) continue;
-        const d = await res.json();
-        const url = d?.originalimage?.source ?? d?.thumbnail?.source ?? null;
-        if (!url) continue;
-
-        if (preferWholeTree) {
-          const score = treeImageScore(`${title} ${url}`);
-          if (score < 0) continue;
-        }
-        return url;
-      }
+    const searchRes = await fetch(
+      `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(name)}&limit=2&format=json&origin=*`
+    );
+    if (!searchRes.ok) return null;
+    const [, titles] = await searchRes.json() as [string, string[]];
+    for (const title of titles ?? []) {
+      const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+      if (!res.ok) continue;
+      const d = await res.json();
+      const url = d?.originalimage?.source ?? d?.thumbnail?.source ?? null;
+      if (url) return url;
     }
     return null;
   } catch { return null; }
@@ -143,8 +64,7 @@ async function removeBackgroundViaBackend(imageUrl: string): Promise<string | nu
 }
 
 function usePlantImage(plant: Plant, removeBackground: boolean): string | null {
-  const preferTreeShot = isTreePlant(plant);
-  const cacheKey = `${plant.name}::${preferTreeShot ? 'tree' : 'default'}::${removeBackground ? 'nobg' : 'orig'}`;
+  const cacheKey = `${plant.name}::${removeBackground ? 'nobg' : 'orig'}`;
   const [imageUri, setImageUri] = useState<string | null>(
     imageCache.has(cacheKey) ? imageCache.get(cacheKey) ?? null : null
   );
@@ -157,27 +77,14 @@ function usePlantImage(plant: Plant, removeBackground: boolean): string | null {
 
     let cancelled = false;
     async function fetchImage() {
-      let uri: string | null = null;
-      if (preferTreeShot) {
-        // For trees, prefer full-habit images before close-up sources.
-        uri = await fetchWikimediaCommonsTreeImage(plant.name);
+      // iNaturalist first — best plant photo coverage by far
+      let uri = await fetchInatImage(plant.name);
+      if (cancelled) return;
+
+      // Wikipedia as fallback
+      if (!uri) {
+        uri = await fetchWikiImage(plant.name);
         if (cancelled) return;
-        if (!uri) {
-          uri = await fetchWikiImage(plant.name, true);
-          if (cancelled) return;
-        }
-        if (!uri) {
-          uri = await fetchInatImage(`${plant.name} tree`);
-          if (cancelled) return;
-        }
-      } else {
-        // Non-tree plants: keep iNaturalist first for higher coverage.
-        uri = await fetchInatImage(plant.name);
-        if (cancelled) return;
-        if (!uri) {
-          uri = await fetchWikiImage(plant.name);
-          if (cancelled) return;
-        }
       }
 
       if (uri && removeBackground) {
@@ -192,7 +99,7 @@ function usePlantImage(plant: Plant, removeBackground: boolean): string | null {
 
     fetchImage();
     return () => { cancelled = true; };
-  }, [cacheKey, plant.name, removeBackground, preferTreeShot]);
+  }, [cacheKey, plant.name, removeBackground]);
 
   return imageUri;
 }
@@ -279,7 +186,6 @@ type ClimateProfile = {
   label: string;
   zone: string;
   region: Region;
-  state?: string;
 };
 
 type Plant = {
@@ -371,8 +277,6 @@ const SCREEN_WIDTH = Dimensions.get('window').width;
 const MIN_CANVAS_SIZE = 220;
 const MAX_CANVAS_HEIGHT = Math.max(MIN_CANVAS_SIZE, Math.min(640, SCREEN_HEIGHT * 0.62));
 const DEFAULT_CANVAS_SIZE = Math.max(MIN_CANVAS_SIZE, Math.min(420, SCREEN_WIDTH - 28));
-const MIN_PLANT_SIZE = 34;
-const DEFAULT_MAX_PLANT_SIZE = 200;
 
 const DEFAULT_CLIMATE_OPTIONS: ClimateProfile[] = [
   { id: 'irvine', label: 'Irvine, CA', zone: '10a', region: 'CA' },
@@ -410,28 +314,6 @@ function clamp(value: number, min: number, max: number): number {
 function normalizeZipCode(rawValue: string): string | null {
   const digitsOnly = rawValue.replace(/\D/g, '');
   return digitsOnly.length < 5 ? null : digitsOnly.slice(0, 5);
-}
-
-function normalizeStateCode(rawValue: string | null | undefined): string | null {
-  if (!rawValue) return null;
-  const lettersOnly = rawValue.replace(/[^a-z]/gi, '').toUpperCase();
-  if (lettersOnly.length < 2) return null;
-  return lettersOnly.slice(0, 2);
-}
-
-function inferStateCodeFromClimate(climate: ClimateProfile): string | null {
-  const direct = normalizeStateCode(climate.state);
-  if (direct) return direct;
-
-  const regionBased = normalizeStateCode(climate.region);
-  if (regionBased) return regionBased;
-
-  const labelMatch = climate.label.match(/,\s*([A-Za-z]{2})(?:\b|$)/);
-  return normalizeStateCode(labelMatch?.[1]);
-}
-
-function maxPlantSize(): number {
-  return DEFAULT_MAX_PLANT_SIZE;
 }
 
 function mergePlantLists(currentPlants: Plant[], incomingPlants: Plant[]): Plant[] {
@@ -752,7 +634,6 @@ export default function HomeScreen() {
   const [selectedPlantId, setSelectedPlantId] = useState<string | null>(null);
   const [zipCodeInput, setZipCodeInput] = useState('');
   const [activeZipCode, setActiveZipCode] = useState<string | null>(null);
-  const [activeStateCode, setActiveStateCode] = useState<string | null>(null);
   const [zipLookupLoading, setZipLookupLoading] = useState(false);
   const [zipLookupMessage, setZipLookupMessage] = useState<string | null>(null);
   const [zipLookupError, setZipLookupError] = useState(false);
@@ -867,7 +748,7 @@ export default function HomeScreen() {
   }, []);
 
   function addPlantToCanvas(plant: Plant) {
-    const size = Math.min(56, maxPlantSize());
+    const size = 56;
     const instanceId = `${plant.id}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     setPlacedPlants(curr => {
       const i = curr.length;
@@ -887,10 +768,9 @@ export default function HomeScreen() {
 
   function resizeSelectedPlant(delta: number) {
     if (!selectedPlantId) return;
-    const maxSize = maxPlantSize();
     setPlacedPlants(curr => curr.map(p => {
       if (p.instanceId !== selectedPlantId) return p;
-      const ns = clamp(p.size + delta, MIN_PLANT_SIZE, maxSize);
+      const ns = clamp(p.size + delta, 34, 120);
       return { ...p, size: ns, x: clamp(p.x, 0, Math.max(0, canvasWidth - ns)), y: clamp(p.y, 0, Math.max(0, canvasHeight - ns)) };
     }));
   }
@@ -1073,12 +953,11 @@ export default function HomeScreen() {
       });
       setClimateOptions(curr => { const f = curr.filter(p => p.id !== payload.climate.id); return [payload.climate, ...f]; });
       setSelectedClimateId(payload.climate.id); setActiveZipCode(zip); setZipCodeInput(zip);
-      setActiveStateCode(normalizeStateCode(payload.state) ?? inferStateCodeFromClimate(payload.climate));
       setZipLookupError(false);
       setZipLookupMessage(null);
       setBackendStatus('connected'); setBackendMessage(`Connected to Flask API (${API_BASE_URL})`);
     } catch (err) {
-      setRecommendations(curr => curr.filter(plant => plant.isUserPlant)); setActiveZipCode(null); setActiveStateCode(null); setZipLookupError(true);
+      setRecommendations(curr => curr.filter(plant => plant.isUserPlant)); setActiveZipCode(null); setZipLookupError(true);
       setZipLookupMessage(err instanceof Error ? err.message : 'ZIP lookup failed.');
     } finally { setZipLookupLoading(false); }
   }
@@ -1096,17 +975,10 @@ export default function HomeScreen() {
     setCustomPlantError(false);
     setCustomPlantMessage('Adding plant...');
     try {
-      const zipCodeForScoring = activeZipCode ?? normalizeZipCode(zipCodeInput);
-      const stateCodeForScoring = activeStateCode ?? inferStateCodeFromClimate(selectedClimate);
       const res = await fetch(`${API_BASE_URL}/api/plants/custom`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          description,
-          zipCode: zipCodeForScoring ?? undefined,
-          state: stateCodeForScoring ?? undefined,
-        }),
+        body: JSON.stringify({ name, description }),
       });
       const payload = await res.json() as ApiCreateCustomPlantResponse;
       if (!res.ok || payload.error || !payload.plant) {
@@ -1218,6 +1090,15 @@ export default function HomeScreen() {
                 autoCapitalize="words"
                 autoCorrect={false}
               />
+              <TextInput
+                value={customPlantDescription}
+                onChangeText={setCustomPlantDescription}
+                style={styles.customPlantTextarea}
+                placeholder="Optional description or notes"
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+              />
               <Pressable
                 onPress={addCustomPlantFromInput}
                 style={[styles.customPlantAddBtn, customPlantLoading && styles.customPlantAddBtnDisabled]}
@@ -1285,6 +1166,7 @@ export default function HomeScreen() {
                 value={canvasImageInput}
                 onChangeText={setCanvasImageInput}
                 style={styles.imageInput}
+                placeholder="Backyard photo URL"
                 autoCapitalize="none"
                 autoCorrect={false}
               />
@@ -1372,47 +1254,49 @@ export default function HomeScreen() {
 
           <View style={[styles.workspacePanel, styles.workspaceDashboardPanel]}>
             <Text style={styles.workspacePanelTitle}>Sustainability Dashboard</Text>
-            <View style={styles.dashboardBody}>
-              <View style={styles.dashboardHero}>
-                <View style={[styles.scoreRing, { borderColor: scoreColor(metrics.sustainabilityScore) }]}>
-                  <Text style={[styles.scoreRingNum, { color: scoreColor(metrics.sustainabilityScore) }]}>{metrics.sustainabilityScore}</Text>
-                  <Text style={styles.scoreRingDenom}>/100</Text>
-                </View>
-                <View style={styles.scoreHeroRight}>
-                  <Text style={[styles.scorePill, { backgroundColor: scoreColor(metrics.sustainabilityScore) }]}>
-                    {describeScore(metrics.sustainabilityScore)}
-                  </Text>
-                  <View style={styles.scoreMiniStats}>
-                    <View style={styles.scoreMiniStat}>
-                      <Text style={styles.scoreMiniNum}>{metrics.nativePercent}%</Text>
-                      <Text style={styles.scoreMiniLabel}>Native %</Text>
-                    </View>
-                  </View>
-                </View>
+            <View style={styles.dashboardHero}>
+              <View style={[styles.scoreRing, { borderColor: scoreColor(metrics.sustainabilityScore) }]}>
+                <Text style={[styles.scoreRingNum, { color: scoreColor(metrics.sustainabilityScore) }]}>{metrics.sustainabilityScore}</Text>
+                <Text style={styles.scoreRingDenom}>/100</Text>
               </View>
-              <View style={styles.dashboardMetrics}>
-                {[
-                  { icon: '💧', label: 'Water Efficiency', value: metrics.waterEfficiency },
-                  { icon: '🐝', label: 'Pollinator Support', value: metrics.pollinatorSupport },
-                  { icon: '☀️', label: 'Drought Resistance', value: metrics.droughtResistance },
-                  { icon: '🌍', label: 'Biodiversity', value: metrics.biodiversity },
-                  { icon: '🌳', label: 'Carbon Impact', value: metrics.carbonImpact },
-                ].map(m => (
-                  <View key={m.label} style={styles.metricRowLight}>
-                    <Text style={styles.metricIcon}>{m.icon}</Text>
-                    <View style={styles.metricBody}>
-                      <View style={styles.metricTop}>
-                        <Text style={styles.metricLabelLight}>{m.label}</Text>
-                        <Text style={styles.metricValueLight}>{describeScore(m.value)} · {m.value}</Text>
-                      </View>
-                      <View style={styles.metricTrackLight}>
-                        <View style={[styles.metricFill, { width: `${m.value}%` as any, backgroundColor: m.value >= 70 ? '#6a9e55' : m.value >= 50 ? '#b8860b' : '#b5451b' }]} />
-                      </View>
-                    </View>
+              <View style={styles.scoreHeroRight}>
+                <Text style={[styles.scorePill, { backgroundColor: scoreColor(metrics.sustainabilityScore) }]}>
+                  {describeScore(metrics.sustainabilityScore)}
+                </Text>
+                <View style={styles.scoreMiniStats}>
+                  <View style={styles.scoreMiniStat}>
+                    <Text style={styles.scoreMiniNum}>{metrics.nativePercent}%</Text>
+                    <Text style={styles.scoreMiniLabel}>Native</Text>
                   </View>
-                ))}
+                  <View style={styles.scoreMiniStat}>
+                    <Text style={styles.scoreMiniNum}>{metrics.weeklyWaterDemand}</Text>
+                    <Text style={styles.scoreMiniLabel}>Water/wk</Text>
+                  </View>
+                </View>
               </View>
             </View>
+            {[
+              { icon: '💧', label: 'Water Efficiency', value: metrics.waterEfficiency },
+              { icon: '🐝', label: 'Pollinator Support', value: metrics.pollinatorSupport },
+              { icon: '☀️', label: 'Drought Resistance', value: metrics.droughtResistance },
+              { icon: '🌍', label: 'Biodiversity', value: metrics.biodiversity },
+              { icon: '🌳', label: 'Carbon Impact', value: metrics.carbonImpact },
+            ].map(m => (
+              <View key={m.label} style={styles.metricRowLight}>
+                <Text style={styles.metricIcon}>{m.icon}</Text>
+                <View style={styles.metricBody}>
+                  <View style={styles.metricTop}>
+                    <Text style={styles.metricLabelLight}>{m.label}</Text>
+                    <Text style={styles.metricValueLight}>{describeScore(m.value)} · {m.value}</Text>
+                  </View>
+                  <View style={styles.metricTrackLight}>
+                    <View style={[styles.metricFill, { width: `${m.value}%` as any, backgroundColor: m.value >= 70 ? '#6a9e55' : m.value >= 50 ? '#b8860b' : '#b5451b' }]} />
+                  </View>
+                </View>
+              </View>
+            ))}
+            <Text style={styles.dashboardFooter}>
+            </Text>
           </View>
         </View>
       </View>
@@ -1469,8 +1353,8 @@ getStartedText: {
   workspacePanel: { borderRadius: 16, borderWidth: 1.5, borderColor: SOFT, backgroundColor: '#fdfaf4', padding: 12, gap: 8 },
   workspacePlantsPanel: Platform.OS === 'web' ? { width: 250 } : { width: '100%' },
   workspaceCanvasPanel: { flex: 1, minWidth: 0 },
-  workspaceDashboardPanel: Platform.OS === 'web' ? { width: 300, minHeight: MAX_CANVAS_HEIGHT + 16 } : { width: '100%', minHeight: 430 },
-  workspacePanelTitle: { fontSize: 22, fontWeight: '800', color: BROWN, alignItems: 'center', textAlign: 'center', marginBottom: 4 },
+  workspaceDashboardPanel: Platform.OS === 'web' ? { width: 300 } : { width: '100%' },
+  workspacePanelTitle: { fontSize: 16, fontWeight: '800', color: BROWN },
   sidePlantScroll: { flexGrow: 0 },
   sidePlantList: { gap: 10, paddingBottom: 4 },
   sidePlantCard: { borderRadius: 14, borderWidth: 1.5, borderColor: SOFT, backgroundColor: WARM_WHITE, padding: 10, gap: 6 },
@@ -1583,31 +1467,21 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
   selRemove: { marginLeft: 'auto', borderWidth: 1.5, borderColor: '#e0c0b0', backgroundColor: '#fff5f0', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
   selRemoveText: { color: '#8f3010', fontWeight: '700', fontSize: 12 },
 
-  dashboardBody: { flex: 1, justifyContent: 'space-between', paddingTop: 28 },
-  dashboardHero: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 14 },
-  dashboardMetrics: { flex: 1, justifyContent: 'space-evenly', gap: 10, marginTop: 8 },
+  dashboardHero: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   scoreCard: { backgroundColor: FOREST, borderRadius: 22, marginHorizontal: 14, padding: 18, gap: 12 },
   scoreHeroBlock: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  scoreRing: { width: 94, height: 94, borderRadius: 47, borderWidth: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f3ece0', marginLeft: 8 },
+  scoreRing: { width: 94, height: 94, borderRadius: 47, borderWidth: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f3ece0' },
   scoreRingNum: { fontSize: 30, fontWeight: '900' },
   scoreRingDenom: { fontSize: 11, color: '#8f7a5d', fontWeight: '600' },
-  scoreHeroRight: { flex: 1, gap: 10, marginLeft: 22 },
+  scoreHeroRight: { flex: 1, gap: 10 },
   scorePill: { alignSelf: 'flex-start', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5, color: '#fff', fontSize: 12, fontWeight: '800', overflow: 'hidden' },
-  scoreMiniStats: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
-  scoreMiniStat: {
-    backgroundColor: '#f2ebdf',
-    borderRadius: 10,
-    width: 88,
-    height: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
+  scoreMiniStats: { flexDirection: 'row', gap: 10 },
+  scoreMiniStat: { backgroundColor: '#f2ebdf', borderRadius: 10, padding: 10, flex: 1 },
   scoreMiniNum: { color: BROWN, fontSize: 18, fontWeight: '900' },
-  scoreMiniLabel: { color: '#7f705a', fontSize: 10, fontWeight: '600', marginTop: 2, textAlign: 'center' },
+  scoreMiniLabel: { color: '#7f705a', fontSize: 10, fontWeight: '600', marginTop: 2 },
 
   metricRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
-  metricRowLight: { flexDirection: 'row', gap: 10, alignItems: 'center', paddingVertical: 2 },
+  metricRowLight: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   metricIcon: { fontSize: 18, width: 26, textAlign: 'center' },
   metricBody: { flex: 1, gap: 4 },
   metricTop: { flexDirection: 'row', justifyContent: 'space-between' },
@@ -1619,5 +1493,5 @@ canvasPlantChipName: { color: '#f0ede0', fontSize: 9, fontWeight: '700', textAli
   metricTrackLight: { height: 5, backgroundColor: '#e4d7c4', borderRadius: 3, overflow: 'hidden' },
   metricFill: { height: 5, borderRadius: 3 },
   scoreFooter: { fontSize: 11, color: 'rgba(180,200,160,0.6)', textAlign: 'center', marginTop: 4 },
-  dashboardFooter: { fontSize: 11, color: '#7d6a55', textAlign: 'center', marginTop: 10 },
+  dashboardFooter: { fontSize: 11, color: '#7d6a55', textAlign: 'center', marginTop: 6 },
 });
