@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Dimensions,
   Image,
@@ -239,6 +239,7 @@ export default function HomeScreen() {
   const [canvasImageMessage, setCanvasImageMessage] = useState<string | null>(null);
   const [canvasImageHasError, setCanvasImageHasError] = useState(false);
   const [canvasDimensions, setCanvasDimensions] = useState({ width: DEFAULT_CANVAS_SIZE, height: DEFAULT_CANVAS_SIZE });
+  const [canvasShellWidth, setCanvasShellWidth] = useState<number | null>(null);
   const uploadedObjectUrlRef = useRef<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const [climateOptions, setClimateOptions] = useState<ClimateProfile[]>(DEFAULT_CLIMATE_OPTIONS);
@@ -254,27 +255,6 @@ export default function HomeScreen() {
   );
   const canvasWidth = canvasDimensions.width;
   const canvasHeight = canvasDimensions.height;
-  const gridUnit = Math.max(20, Math.round(Math.min(canvasWidth, canvasHeight) / 12));
-  const verticalGridLines = useMemo(() => {
-    const lines: number[] = [];
-    for (let position = 0; position <= canvasWidth; position += gridUnit) {
-      lines.push(position);
-    }
-    if (lines[lines.length - 1] !== canvasWidth) {
-      lines.push(canvasWidth);
-    }
-    return lines;
-  }, [canvasWidth, gridUnit]);
-  const horizontalGridLines = useMemo(() => {
-    const lines: number[] = [];
-    for (let position = 0; position <= canvasHeight; position += gridUnit) {
-      lines.push(position);
-    }
-    if (lines[lines.length - 1] !== canvasHeight) {
-      lines.push(canvasHeight);
-    }
-    return lines;
-  }, [canvasHeight, gridUnit]);
   const plantsById = useMemo(() =>
     plantLibrary.reduce<Record<string, Plant>>((acc, p) => { acc[p.id] = p; return acc; }, {}), [plantLibrary]);
   const fallbackMetrics = useMemo(() =>
@@ -399,29 +379,41 @@ export default function HomeScreen() {
     uploadedObjectUrlRef.current = null;
   }
 
+  const getMaxCanvasWidth = useCallback((): number => {
+    const shellWidth = canvasShellWidth ?? Math.min(900, SCREEN_WIDTH - 32);
+    return Math.max(120, Math.floor(shellWidth - 18));
+  }, [canvasShellWidth]);
+
   function fitCanvasToImage(sourceWidth: number, sourceHeight: number) {
     if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) || sourceWidth <= 0 || sourceHeight <= 0) {
       return;
     }
-    const maxCanvasWidth = Math.max(MIN_CANVAS_SIZE, Math.min(900, SCREEN_WIDTH - 32));
+    const maxCanvasWidth = getMaxCanvasWidth();
     const maxCanvasHeight = Math.max(MIN_CANVAS_SIZE, Math.min(640, SCREEN_HEIGHT * 0.62));
-    const downscale = Math.min(maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
+    const scale = Math.min(1, maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
 
-    let width = Math.round(sourceWidth * downscale);
-    let height = Math.round(sourceHeight * downscale);
-
-    if (width < MIN_CANVAS_SIZE || height < MIN_CANVAS_SIZE) {
-      const minScale = Math.max(MIN_CANVAS_SIZE / sourceWidth, MIN_CANVAS_SIZE / sourceHeight);
-      const boundedScale = Math.min(minScale, maxCanvasWidth / sourceWidth, maxCanvasHeight / sourceHeight);
-      width = Math.round(sourceWidth * boundedScale);
-      height = Math.round(sourceHeight * boundedScale);
-    }
+    const width = Math.round(sourceWidth * scale);
+    const height = Math.round(sourceHeight * scale);
 
     setCanvasDimensions({
       width: Math.max(1, width),
       height: Math.max(1, height),
     });
   }
+
+  useEffect(() => {
+    const maxCanvasWidth = getMaxCanvasWidth();
+    setCanvasDimensions(current => {
+      if (current.width <= maxCanvasWidth) {
+        return current;
+      }
+      const scale = maxCanvasWidth / current.width;
+      return {
+        width: Math.max(1, Math.round(current.width * scale)),
+        height: Math.max(1, Math.round(current.height * scale)),
+      };
+    });
+  }, [getMaxCanvasWidth]);
 
   async function probeImageDimensions(uri: string): Promise<{ width: number; height: number } | null> {
     if (!uri) {
@@ -656,7 +648,12 @@ export default function HomeScreen() {
                 : <Text style={styles.hint}>Upload from device or paste a hosted URL.</Text>}
             </View>
 
-            <View style={styles.canvasShell}>
+            <View
+              style={styles.canvasShell}
+              onLayout={(event) => {
+                const measuredWidth = Math.max(1, Math.round(event.nativeEvent.layout.width));
+                setCanvasShellWidth(previous => (previous === measuredWidth ? previous : measuredWidth));
+              }}>
               <View style={[styles.canvas, { width: canvasWidth, height: canvasHeight }]}>
                 {canvasImageUri ? (
                   <>
@@ -682,12 +679,6 @@ export default function HomeScreen() {
                     <View pointerEvents="none" style={styles.canvasOverlay} />
                   </>
                 ) : null}
-                {verticalGridLines.map((position, index) => (
-                  <View key={`v${index}-${position}`} style={[styles.gridV, { left: position }]} />
-                ))}
-                {horizontalGridLines.map((position, index) => (
-                  <View key={`h${index}-${position}`} style={[styles.gridH, { top: position }]} />
-                ))}
 
                 {placedPlants.map(item => {
                   const plant = plantsById[item.plantId];
