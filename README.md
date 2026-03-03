@@ -7,11 +7,9 @@ Sustainable Garden Designer MVP with:
 ## 1) Run Flask backend
 
 ```bash
-cd /Users/24ishak/Desktop/sustainable-garden
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-# set your Flora API key in /Users/24ishak/Desktop/sustainable-garden/.env
 python backend/app.py
 ```
 
@@ -20,7 +18,7 @@ Backend runs on `http://127.0.0.1:5001`.
 ## 2) Run frontend (Expo)
 
 ```bash
-cd /Users/24ishak/Desktop/sustainable-garden/EcoScape
+cd EcoScape
 npm install
 npm run web
 ```
